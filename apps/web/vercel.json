@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/cardapio/:slug", "destination": "/api/cardapio-og?slug=:slug" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "BurgerHub Motoboy",
+  "short_name": "Motoboy",
+  "description": "App do entregador BurgerHub — aceite corridas, navegue até o cliente e atualize o status da entrega.",
+  "start_url": "/motoboy",
+  "scope": "/motoboy",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e0e11",
+  "theme_color": "#f59e0b",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

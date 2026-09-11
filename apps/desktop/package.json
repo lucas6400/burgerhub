@@ -1,0 +1,39 @@
+{
+  "name": "@burgerhub/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "App desktop do BurgerHub — carrega o painel normal e adiciona impressão nativa sem caixa de diálogo, bandeja do sistema e início automático com o Windows",
+  "main": "main.js",
+  "author": "BurgerHub",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "app-builder-bin": "^5.0.0-alpha.10",
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.burgerhub.desktop",
+    "productName": "BurgerHub",
+    "electronVersion": "33.4.11",
+    "icon": "build/icon.ico",
+    "files": [
+      "main.js",
+      "preload.js",
+      "store.js",
+      "tray-icon.js"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

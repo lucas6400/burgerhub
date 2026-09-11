@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.local
+apps/api/prisma/dev.db
+apps/api/prisma/dev.db-journal
+.DS_Store
+Thumbs.db
+.vercel
+*.tsbuildinfo
+.claude/
+Imagem do Codex*.png

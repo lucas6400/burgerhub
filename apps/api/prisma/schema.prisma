@@ -1,0 +1,853 @@
+// ============================================================
+// BurgerHub — Modelagem Multi-Tenant
+// Valores monetários em CENTAVOS (Int) para precisão.
+// "Enums" são Strings validadas na camada de aplicação.
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // DATABASE_URL: conexão via pooler (pgbouncer) — usada em runtime.
+  // DATABASE_URL_UNPOOLED: conexão direta — usada por `prisma db push`/`migrate`.
+  // Nomes padronizados pela integração Neon/Vercel Postgres.
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ---------------- TENANT ----------------
+
+model Tenant {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String   @unique
+  phone     String?
+  active    Boolean  @default(true)
+  plan      String   @default("PRO") // TRIAL | BASIC | PRO | ENTERPRISE
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  settings        TenantSettings?
+  businessHours   BusinessHour[]
+  deliveryRadiusTiers DeliveryRadiusTier[]
+  users           User[]
+  categories      Category[]
+  products        Product[]
+  ingredients     Ingredient[]
+  addonGroups     AddonGroup[]
+  combos          Combo[]
+  customers       Customer[]
+  coupons         Coupon[]
+  orders          Order[]
+  tables          Table[]
+  suppliers       Supplier[]
+  purchases       Purchase[]
+  stockMovements  StockMovement[]
+  financeEntries  FinancialEntry[]
+  reviews         Review[]
+  campaigns       Campaign[]
+  auditLogs       AuditLog[]
+  loyaltyProgram  LoyaltyProgram?
+  chatSessions    ChatSession[]
+  payments        Payment[]
+  brands          Brand[]
+  drivers         Driver[]
+  deliveries      Delivery[]
+}
+
+model TenantSettings {
+  id                  String  @id @default(cuid())
+  tenantId            String  @unique
+  tenant              Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  logoUrl             String?
+  bannerUrl           String?
+  primaryColor        String  @default("#f59e0b")
+  address             String?
+  instagram           String?
+  facebook            String?
+  pixKey              String?
+  acceptsDelivery     Boolean @default(true)
+  acceptsPickup       Boolean @default(true)
+  acceptsDineIn       Boolean @default(true)
+  kdsEnabled          Boolean @default(true) // false p/ lojas que operam só com PDV, sem fluxo de cozinha
+  defaultPrepMinutes  Int     @default(30)
+  minOrderCents       Int     @default(0)
+  freeDeliveryAbove   Int?    // centavos; null = sem frete grátis global
+  isOpenOverride      Boolean? // força aberto/fechado ignorando horários
+  closedMessage       String  @default("Estamos fechados no momento. Confira nossos horários!")
+  paymentMethods      String  @default("PIX,CASH,CREDIT,DEBIT") // CSV: PIX,CASH,CREDIT,DEBIT,VR,VA,ONLINE
+  autoPrint           Boolean @default(false)
+  // WhatsApp — o lojista conecta só escaneando o QR Code.
+  // A infraestrutura (servidor/chaves) é da plataforma, via env.
+  waEnabled           Boolean @default(false) // conectado e ativo
+  waInstanceName      String? // identificador interno da conexão
+  waNumber            String? // número conectado (exibição)
+  botEnabled          Boolean @default(true) // bot de pedidos automático
+  // API oficial da Meta (Cloud API) — alternativa ao Evolution/QR acima, cada
+  // tenant conecta o PRÓPRIO número via Embedded Signup (sem QR code). Até a
+  // BurgerHub ter o App/Business verificados na Meta, waProvider fica sempre
+  // EVOLUTION — nenhum tenant usa este caminho ainda.
+  waProvider           String  @default("EVOLUTION") // EVOLUTION | CLOUD_API
+  waCloudPhoneNumberId String?
+  waCloudWabaId        String?
+  waCloudAccessToken   String?
+  // Pagamento online (Mercado Pago) — credenciais do PRÓPRIO estabelecimento:
+  // o dinheiro cai direto na conta do lojista.
+  mpEnabled           Boolean @default(false)
+  mpAccessToken       String?
+  mpPublicKey         String? // não sensível — usada no navegador do cliente p/ tokenizar cartão
+  // Preenchidos só quando a conexão é via OAuth ("Conectar com Mercado Pago",
+  // 1 clique) em vez de colar o Access Token manualmente. mpUserId é o
+  // collector_id do vendedor na MP — necessário pra split de pagamento (application_fee).
+  mpRefreshToken      String?
+  mpUserId            String?
+  // Interruptor interno (nunca exposto no formulário de Configurações do
+  // lojista): liga a taxa de marketplace (split) pra este tenant. Fica
+  // desligado por padrão mesmo com OAuth conectado — é ligado manualmente
+  // só pra clientes pagantes de verdade, nunca pros próprios estabelecimentos
+  // de teste do dono da BurgerHub (cobrar taxa da própria conta não faz
+  // sentido: seria a mesma carteira Mercado Pago recebendo dela mesma).
+  mpSplitEnabled      Boolean @default(false)
+  // Localização do estabelecimento — usada para calcular a taxa de entrega
+  // automaticamente pela distância até o cliente (sem o cliente escolher).
+  storeLat            Float?
+  storeLng            Float?
+  maxDeliveryRadiusKm Float   @default(10)
+  msgOrderReceived    String  @default("✅ Pedido #{n} recebido! Já estamos cuidando de tudo.")
+  msgOrderPreparing   String  @default("👨‍🍳 Pedido #{n} em preparo!")
+  msgOrderOut         String  @default("🛵 Pedido #{n} saiu para entrega!")
+  msgOrderDelivered   String  @default("🍔 Pedido #{n} entregue! Bom apetite. Avalie seu pedido: {link}")
+  // Pesos do dispatch_score (JSON) — null usa DEFAULT_DISPATCH_CONFIG. Preparado
+  // pra virar configurável pela área administrativa sem mudar o schema de novo.
+  dispatchWeights     String?
+  // Regras de agrupamento de pedidos (JSON) — null usa DEFAULT_GROUPING_CONFIG.
+  groupingRules       String?
+  // Regra de pagamento do entregador (JSON) — null usa DEFAULT_PAYOUT_CONFIG (Fase 5 — custo/turnos).
+  driverPayoutRules   String?
+  // iFood Entregas (Fase 6) — credenciais do PRÓPRIO estabelecimento no Portal do Parceiro.
+  // Sem client secret configurado, a integração roda em modo demonstração (mock).
+  ifoodEnabled        Boolean @default(false)
+  ifoodMerchantId     String?
+  ifoodClientId       String?
+  ifoodClientSecret   String?
+}
+
+model BusinessHour {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  weekday  Int // 0=domingo ... 6=sábado
+  openTime String // "18:00"
+  closeTime String // "23:30"
+  closed   Boolean @default(false) // loja fechada nesse dia, mesmo com horário preenchido
+
+  @@index([tenantId, weekday])
+}
+
+// Faixa de entrega por distância (raio a partir do estabelecimento).
+// Ex.: até 3km = R$5, até 6km = R$8. O cliente NUNCA escolhe — o backend
+// geocodifica o endereço e calcula a faixa aplicável automaticamente.
+model DeliveryRadiusTier {
+  id         String  @id @default(cuid())
+  tenantId   String
+  tenant     Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  maxKm      Float // atende endereços até esta distância (km)
+  feeCents   Int
+  etaMinutes Int     @default(45)
+  minOrderCents Int? // mínimo específico da faixa; null = usa o mínimo global do tenant
+  active     Boolean @default(true)
+
+  @@index([tenantId])
+}
+
+// ---------------- USUÁRIOS ----------------
+
+model User {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  email        String
+  passwordHash String
+  role         String   @default("ATTENDANT") // ADMIN | MANAGER | CASHIER | ATTENDANT | DISPATCHER | KITCHEN | COURIER
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  // Recuperação de senha — guarda o HASH do token (nunca o token em texto puro),
+  // igual a uma senha. Expira em 1h; limpo depois de usado.
+  passwordResetTokenHash  String?   @unique
+  passwordResetExpiresAt  DateTime?
+
+  auditLogs AuditLog[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+// ---------------- CATÁLOGO ----------------
+
+model Category {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  icon         String?
+  displayOrder Int       @default(0)
+  active       Boolean   @default(true)
+  products     Product[]
+
+  @@index([tenantId])
+}
+
+model Product {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  categoryId     String
+  category       Category @relation(fields: [categoryId], references: [id])
+  name           String
+  description    String?
+  priceCents     Int
+  promoPriceCents Int?
+  imageUrl       String?
+  available      Boolean  @default(true)
+  showInKds      Boolean  @default(true) // false p/ itens sem preparo (bebidas, sobremesas...) — não aparecem na Cozinha
+  prepMinutes    Int      @default(20)
+  weightGrams    Int?
+  sku            String?
+  internalCode   String?
+  displayOrder   Int      @default(0)
+  featured       Boolean  @default(false) // aparece no carrossel de destaques do cardápio público
+  favorite       Boolean  @default(false) // só um por tenant — vira o "favorito da casa" no carrossel
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  ingredients  ProductIngredient[]
+  addonGroups  ProductAddonGroup[]
+  comboItems   ComboItem[]
+  orderItems   OrderItem[]
+  combosAsBase Combo[]             @relation("ComboBaseProduct")
+
+  @@index([tenantId, categoryId])
+}
+
+// Ingrediente = também item de estoque
+model Ingredient {
+  id            String  @id @default(cuid())
+  tenantId      String
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  unit          String  @default("un") // un | g | kg | ml | l
+  stockQty      Float   @default(0)
+  minStockQty   Float   @default(0)
+  costCentsPerUnit Int  @default(0)
+  active        Boolean @default(true)
+
+  productLinks   ProductIngredient[]
+  stockMovements StockMovement[]
+  purchaseItems  PurchaseItem[]
+
+  @@index([tenantId])
+}
+
+model ProductIngredient {
+  id           String     @id @default(cuid())
+  productId    String
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  quantity     Float // na unidade do ingrediente
+  removable    Boolean    @default(true) // cliente pode remover?
+
+  removals OrderItemRemoval[]
+
+  @@unique([productId, ingredientId])
+}
+
+// Grupos de adicionais reutilizáveis entre produtos
+model AddonGroup {
+  id        String  @id @default(cuid())
+  tenantId  String
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String // ex: "Adicionais", "Molhos"
+  minSelect Int     @default(0)
+  maxSelect Int     @default(5)
+  required  Boolean @default(false)
+
+  addons   Addon[]
+  products ProductAddonGroup[]
+
+  @@index([tenantId])
+}
+
+model Addon {
+  id         String     @id @default(cuid())
+  groupId    String
+  group      AddonGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  name       String
+  priceCents Int        @default(0)
+  imageUrl   String?
+  maxQty     Int        @default(3)
+  available  Boolean    @default(true)
+
+  orderItemAddons OrderItemAddon[]
+}
+
+model ProductAddonGroup {
+  productId String
+  product   Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  groupId   String
+  group     AddonGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([productId, groupId])
+}
+
+// Combos inteligentes: "transformar em combo"
+model Combo {
+  id              String  @id @default(cuid())
+  tenantId        String
+  tenant          Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  baseProductId   String
+  baseProduct     Product @relation("ComboBaseProduct", fields: [baseProductId], references: [id], onDelete: Cascade)
+  promoPriceCents Int // preço do combo completo
+  active          Boolean @default(true)
+
+  items ComboItem[]
+
+  @@index([tenantId])
+}
+
+model ComboItem {
+  id        String  @id @default(cuid())
+  comboId   String
+  combo     Combo   @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Int     @default(1)
+}
+
+// ---------------- CLIENTES ----------------
+
+model Customer {
+  id            String    @id @default(cuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  phone         String
+  email         String?
+  cpf           String?
+  birthDate     DateTime?
+  tier          String    @default("BRONZE") // BRONZE | PRATA | OURO | VIP
+  notes         String?
+  loyaltyPoints Int       @default(0)
+  cashbackCents Int       @default(0)
+  createdAt     DateTime  @default(now())
+
+  addresses           CustomerAddress[]
+  orders              Order[]
+  loyaltyTransactions LoyaltyTransaction[]
+
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+}
+
+model CustomerAddress {
+  id           String   @id @default(cuid())
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  label        String   @default("Casa") // Casa | Trabalho | Outro...
+  street       String
+  number       String
+  complement   String?
+  neighborhood String
+  city         String
+  state        String   @default("")
+  cep          String?
+  reference    String?
+  isDefault    Boolean  @default(false)
+}
+
+// ---------------- FIDELIDADE ----------------
+
+model LoyaltyProgram {
+  id                      String  @id @default(cuid())
+  tenantId                String  @unique
+  tenant                  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type                    String  @default("POINTS") // POINTS | CASHBACK | BUY_X_GET_Y
+  active                  Boolean @default(false)
+  pointsPerReal           Int     @default(1)
+  cashbackPct             Float   @default(5)
+  buyX                    Int     @default(10)
+  getY                    String  @default("1 hambúrguer grátis")
+  validityDays            Int     @default(90)
+  redemptionCentsPerPoint Float   @default(0.01) // R$ de volta por ponto resgatado (resgate de pontos futuro)
+  minRedeemPoints         Int     @default(0)
+}
+
+model LoyaltyTransaction {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type       String // EARN | REDEEM | EXPIRE
+  points     Int      @default(0)
+  cashCents  Int      @default(0)
+  orderId    String?
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime?
+}
+
+// ---------------- CUPONS ----------------
+
+model Coupon {
+  id                String    @id @default(cuid())
+  tenantId          String
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code              String
+  type              String // PERCENT | FIXED | FREE_SHIPPING
+  valueCents        Int       @default(0) // para FIXED
+  valuePct          Float     @default(0) // para PERCENT
+  minOrderCents     Int       @default(0)
+  maxUses           Int?
+  usedCount         Int       @default(0)
+  firstPurchaseOnly Boolean   @default(false)
+  birthdayOnly      Boolean   @default(false)
+  active            Boolean   @default(true)
+  expiresAt         DateTime?
+  createdAt         DateTime  @default(now())
+
+  orders Order[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+// ---------------- MESAS ----------------
+
+model Table {
+  id        String  @id @default(cuid())
+  tenantId  String
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  number    Int
+  seats     Int     @default(4)
+  status    String  @default("FREE") // FREE | OPEN | CLOSING
+  openedAt  DateTime?
+
+  orders Order[]
+
+  @@unique([tenantId, number])
+}
+
+// ---------------- PEDIDOS ----------------
+
+model Order {
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  number          Int // sequencial por tenant
+  customerId      String?
+  customer        Customer? @relation(fields: [customerId], references: [id])
+  tableId         String?
+  table           Table?    @relation(fields: [tableId], references: [id])
+  brandId         String?
+  brand           Brand?    @relation(fields: [brandId], references: [id])
+  brandName       String? // snapshot — mesma marca pode ser renomeada/removida depois
+  type            String    @default("DELIVERY") // DELIVERY | PICKUP | DINE_IN
+  source          String    @default("MENU") // MENU | WHATSAPP | POS | TABLE
+  status          String    @default("NEW") // NEW | PREPARING | FINISHING | READY | OUT_FOR_DELIVERY | DELIVERED | SETTLED | CANCELED
+  priority        Boolean   @default(false)
+  subtotalCents   Int
+  discountCents   Int       @default(0)
+  deliveryFeeCents Int      @default(0)
+  deliveryDistanceKm Float? // calculada automaticamente (raio a partir do estabelecimento)
+  totalCents      Int
+  paymentMethod   String? // PIX | CASH | CREDIT | DEBIT | VR | VA | ONLINE — null = comanda aberta, cobrança pendente (pedido "No local" lançado sem definir forma de pagamento)
+  paymentStatus   String    @default("PENDING") // PENDING | PAID | REFUNDED
+  changeForCents  Int? // troco para (dinheiro)
+  couponId        String?
+  coupon          Coupon?   @relation(fields: [couponId], references: [id])
+  couponCode      String?
+  notes           String?
+  cancelReason    String?
+  // snapshot do endereço no momento do pedido
+  addressLabel    String?
+  addressStreet   String?
+  addressNumber   String?
+  addressNeighborhood String?
+  addressCity     String?
+  addressComplement String?
+  addressReference String?
+  deliveryLat     Float? // coordenada resolvida do cliente (mapa/GPS ou geocodificação) — usada pra rastreio/mapa
+  deliveryLng     Float?
+  createdAt       DateTime  @default(now())
+  confirmedAt     DateTime?
+  readyAt         DateTime?
+  dispatchedAt    DateTime?
+  deliveredAt     DateTime?
+  settledAt       DateTime? // fechamento de conta de mesa (DINE_IN)
+  canceledAt      DateTime?
+
+  items        OrderItem[]
+  statusEvents OrderStatusEvent[]
+  review       Review?
+  payment      Payment?
+  delivery     Delivery?
+
+  @@unique([tenantId, number])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+}
+
+model OrderItem {
+  id             String  @id @default(cuid())
+  orderId        String
+  order          Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId      String?
+  product        Product? @relation(fields: [productId], references: [id])
+  nameSnapshot   String
+  unitPriceCents Int
+  quantity       Int     @default(1)
+  notes          String?
+  isComboItem    Boolean @default(false)
+  showInKds      Boolean @default(true) // snapshot de Product.showInKds no momento do pedido
+
+  addons   OrderItemAddon[]
+  removals OrderItemRemoval[]
+}
+
+model OrderItemAddon {
+  id             String    @id @default(cuid())
+  orderItemId    String
+  orderItem      OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  addonId        String?
+  addon          Addon?    @relation(fields: [addonId], references: [id])
+  nameSnapshot   String
+  unitPriceCents Int
+  quantity       Int       @default(1)
+}
+
+model OrderItemRemoval {
+  id                  String             @id @default(cuid())
+  orderItemId         String
+  orderItem           OrderItem          @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  productIngredientId String?
+  productIngredient   ProductIngredient? @relation(fields: [productIngredientId], references: [id])
+  nameSnapshot        String
+}
+
+model OrderStatusEvent {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus String?
+  toStatus  String
+  byUserId  String?
+  createdAt DateTime @default(now())
+}
+
+// ---------------- ESTOQUE / COMPRAS ----------------
+
+model Supplier {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  phone     String?
+  email     String?
+  cnpj      String?
+  notes     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  purchases Purchase[]
+
+  @@index([tenantId])
+}
+
+model Purchase {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  totalCents Int
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  items PurchaseItem[]
+
+  @@index([tenantId])
+}
+
+model PurchaseItem {
+  id             String     @id @default(cuid())
+  purchaseId     String
+  purchase       Purchase   @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  ingredientId   String
+  ingredient     Ingredient @relation(fields: [ingredientId], references: [id])
+  quantity       Float
+  unitCostCents  Int
+}
+
+model StockMovement {
+  id           String     @id @default(cuid())
+  tenantId     String
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  type         String // IN | OUT | ADJUST
+  quantity     Float // positivo = entrada, negativo = saída
+  reason       String? // "Pedido #123", "Compra", "Ajuste manual"
+  refOrderId   String?
+  refPurchaseId String?
+  createdAt    DateTime   @default(now())
+
+  @@index([tenantId, ingredientId])
+}
+
+// ---------------- FINANCEIRO ----------------
+
+model FinancialEntry {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type        String // INCOME | EXPENSE
+  category    String    @default("Outros") // Vendas | Insumos | Aluguel | Salários | Marketing | Taxas | Outros
+  description String
+  amountCents Int
+  dueDate     DateTime?
+  paidAt      DateTime?
+  refOrderId  String?
+  createdAt   DateTime  @default(now())
+
+  @@index([tenantId, type])
+  @@index([tenantId, dueDate])
+}
+
+// ---------------- AVALIAÇÕES ----------------
+
+model Review {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId   String   @unique
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  rating    Int // 1..5
+  npsScore  Int? // 0..10
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+// ---------------- MARKETING ----------------
+
+model Campaign {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  audience    String    @default("ALL") // ALL | INACTIVE_30D | BIRTHDAY | VIP | CUSTOM
+  message     String
+  couponCode  String?
+  status      String    @default("DRAFT") // DRAFT | SCHEDULED | SENDING | SENT
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  sentCount   Int       @default(0)
+  createdAt   DateTime  @default(now())
+
+  @@index([tenantId])
+}
+
+// ---------------- PAGAMENTOS ONLINE ----------------
+
+model Payment {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId        String    @unique
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider       String    @default("MERCADOPAGO")
+  method         String // PIX | CARD
+  status         String    @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELED
+  amountCents    Int
+  mpPaymentId    String?
+  mpPreferenceId String?
+  pixQrCode      String? // copia e cola
+  pixQrBase64    String? // imagem do QR (base64)
+  checkoutUrl    String? // checkout de cartão
+  platformFeeCents Int? // taxa da BurgerHub (split via application_fee), null = não cobrada
+  createdAt      DateTime  @default(now())
+  paidAt         DateTime?
+
+  @@index([tenantId])
+  @@index([mpPaymentId])
+}
+
+// ---------------- WHATSAPP BOT ----------------
+
+// Estado da conversa de cada cliente com o bot (máquina de estados)
+model ChatSession {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  phone     String
+  state     String   @default("MAIN") // MAIN | ORDERING | CHECKOUT_TYPE | CHECKOUT_ADDRESS | CHECKOUT_PAYMENT | CHECKOUT_CHANGE | CONFIRM
+  data      String   @default("{}") // JSON: carrinho, endereço, pagamento em montagem
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, phone])
+}
+
+// ---------------- AUDITORIA ----------------
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String // CREATE | UPDATE | DELETE | LOGIN | STATUS_CHANGE ...
+  entity    String
+  entityId  String?
+  detail    String? // JSON serializado
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+// ---------------- ENTREGAS / CENTRAL DE DESPACHO ----------------
+
+// Marca virtual dentro do mesmo tenant (ex.: dark kitchen com várias marcas
+// produzindo na mesma cozinha). Opcional — quem não usa, deixa o pedido sem marca.
+model Brand {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name     String
+  logoUrl  String?
+  active   Boolean @default(true)
+
+  orders Order[]
+
+  @@index([tenantId])
+}
+
+model Driver {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId   String? @unique // vínculo opcional c/ User (role COURIER) — login futuro do entregador
+  name     String
+  phone    String
+  document String?
+  vehicleType   String  @default("MOTORCYCLE") // MOTORCYCLE | BICYCLE | CAR | ON_FOOT
+  vehiclePlate  String?
+  status        String  @default("OFFLINE") // OFFLINE | AVAILABLE | HEADING_TO_STORE | WAITING_PICKUP | DELIVERING | RETURNING | PAUSED
+  active        Boolean @default(true)
+  currentLat     Float?
+  currentLng     Float?
+  lastLocationAt DateTime?
+  maxSimultaneousOrders Int @default(3)
+  createdAt DateTime @default(now())
+
+  deliveries Delivery[]
+  locations  DriverLocation[]
+  shifts     DriverShift[]
+
+  @@index([tenantId, status])
+}
+
+model Delivery {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orderId  String @unique
+  order    Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  driverId String?
+  driver   Driver? @relation(fields: [driverId], references: [id])
+  // AWAITING_DRIVER | DRIVER_ASSIGNED | HEADING_TO_STORE | WAITING_PICKUP | PICKED_UP | OUT_FOR_DELIVERY | ARRIVING | DELIVERED | FAILED | CANCELED
+  status   String @default("AWAITING_DRIVER")
+
+  pickupLat      Float
+  pickupLng      Float
+  destinationLat Float?
+  destinationLng Float?
+
+  estimatedDistanceKm Float?
+  actualDistanceKm    Float?
+  estimatedDurationMin Int?
+  estimatedDeliveryAt DateTime?
+  promisedDeliveryAt  DateTime?
+
+  stopSequence Int? // posição na rota quando agrupada com outras entregas do mesmo entregador (Fase 2 — rota multi-parada)
+
+  assignedAt       DateTime?
+  headingToStoreAt DateTime?
+  pickedUpAt       DateTime?
+  startedAt        DateTime? // saiu para entrega
+  deliveredAt      DateTime?
+  failedReason     String?
+  costCents        Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events   DeliveryEvent[]
+  messages DeliveryMessage[]
+
+  @@index([tenantId, status])
+}
+
+model DeliveryEvent {
+  id         String   @id @default(cuid())
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  type       String // STATUS_CHANGED | DRIVER_ASSIGNED | DRIVER_UNASSIGNED
+  fromStatus String?
+  toStatus   String?
+  byUserId   String?
+  detail     String?
+  createdAt  DateTime @default(now())
+
+  @@index([deliveryId])
+}
+
+// Chat da entrega — cliente (via link público do pedido) ↔ entregador (app do motoboy).
+model DeliveryMessage {
+  id         String   @id @default(cuid())
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  sender     String // CUSTOMER | DRIVER
+  body       String
+  createdAt  DateTime @default(now())
+
+  @@index([deliveryId, createdAt])
+}
+
+// Histórico de posição — nunca sobrescreve, sempre insere uma linha nova.
+model DriverLocation {
+  id         String   @id @default(cuid())
+  driverId   String
+  driver     Driver   @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  lat        Float
+  lng        Float
+  speed      Float?
+  heading    Float?
+  accuracy   Float?
+  recordedAt DateTime @default(now())
+
+  @@index([driverId, recordedAt])
+}
+
+model DriverShift {
+  id        String    @id @default(cuid())
+  driverId  String
+  driver    Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  @@index([driverId])
+}
