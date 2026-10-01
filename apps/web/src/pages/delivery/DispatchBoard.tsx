@@ -207,6 +207,11 @@ export function DispatchBoardPage() {
                   <p className="mt-1 flex items-center gap-1 text-[11px] text-surface-400">
                     <MapPin size={11} /> {d.order.addressNeighborhood} · pronto {timeAgo(d.order.readyAt ?? d.order.createdAt)}
                   </p>
+                  {d.order.deliveryLocationPrecise === false && (
+                    <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                      ⚠️ Localização aproximada
+                    </p>
+                  )}
                 </button>
               ))}
             </div>
@@ -273,7 +278,14 @@ export function DispatchBoardPage() {
                       </div>
                       <DeliveryStatusBadge status={d.status} />
                     </div>
-                    <p className="text-[11px] text-surface-400">{d.driver?.name ?? "—"}</p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] text-surface-400">{d.driver?.name ?? "—"}</p>
+                      {d.estimatedDeliveryAt && (
+                        <p className="text-[11px] font-semibold text-brand-600 dark:text-brand-400">
+                          chega ~{Math.max(0, Math.round((new Date(d.estimatedDeliveryAt).getTime() - Date.now()) / 60_000))} min
+                        </p>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import {
+  ArrowDownNarrowWide,
   ArrowUpDown,
   ChefHat,
   ImageOff,
@@ -12,6 +13,7 @@ import {
   UtensilsCrossed,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { ImageUploadField } from "../components/ImageUploadField";
 import { brl, parseBrl } from "../lib/format";
 import {
   Badge,
@@ -36,6 +38,7 @@ interface ProductForm {
   price: string;
   promoPrice: string;
   imageUrl: string;
+  whatsappImageUrl: string;
   categoryId: string;
   prepMinutes: string;
   sku: string;
@@ -49,6 +52,7 @@ const emptyForm: ProductForm = {
   price: "",
   promoPrice: "",
   imageUrl: "",
+  whatsappImageUrl: "",
   categoryId: "",
   prepMinutes: "20",
   sku: "",
@@ -100,6 +104,7 @@ export function ProductsPage() {
       price: (p.priceCents / 100).toFixed(2).replace(".", ","),
       promoPrice: p.promoPriceCents ? (p.promoPriceCents / 100).toFixed(2).replace(".", ",") : "",
       imageUrl: p.imageUrl ?? "",
+      whatsappImageUrl: p.whatsappImageUrl ?? "",
       categoryId: p.categoryId,
       prepMinutes: String(p.prepMinutes),
       sku: p.sku ?? "",
@@ -215,6 +220,7 @@ export function ProductsPage() {
       priceCents: parseBrl(form.price),
       promoPriceCents: form.promoPrice ? parseBrl(form.promoPrice) : null,
       imageUrl: form.imageUrl || null,
+      whatsappImageUrl: form.whatsappImageUrl || null,
       categoryId: form.categoryId,
       prepMinutes: parseInt(form.prepMinutes) || 20,
       sku: form.sku || null,
@@ -283,6 +289,43 @@ export function ProductsPage() {
     }
   }
 
+  // Reordena de uma vez (mais barato -> mais caro) dentro de cada categoria,
+  // reaproveitando o mesmo endpoint de drag-and-drop, sem precisar arrastar item por item.
+  async function sortAllByPrice() {
+    if (!products || products.length === 0) return;
+    if (
+      !confirm(
+        "Isso vai reorganizar os itens de todas as categorias do mais barato pro mais caro, substituindo a ordem manual atual. Continuar?",
+      )
+    )
+      return;
+
+    const byCategory = new Map<string, Product[]>();
+    for (const p of products) {
+      const list = byCategory.get(p.categoryId) ?? [];
+      list.push(p);
+      byCategory.set(p.categoryId, list);
+    }
+
+    const previous = products;
+    const reordered: Product[] = [];
+    const updates: { categoryId: string; ids: string[] }[] = [];
+    for (const [categoryId, items] of byCategory) {
+      const sorted = [...items].sort(
+        (a, b) => (a.promoPriceCents ?? a.priceCents) - (b.promoPriceCents ?? b.priceCents),
+      );
+      reordered.push(...sorted);
+      updates.push({ categoryId, ids: sorted.map((p) => p.id) });
+    }
+    setProducts(reordered);
+
+    try {
+      await Promise.all(updates.map((u) => api.put("/products/reorder", u)));
+    } catch {
+      setProducts(previous);
+    }
+  }
+
   const filtered = products?.filter((p) => !categoryFilter || p.categoryId === categoryFilter);
 
   return (
@@ -291,7 +334,10 @@ export function ProductsPage() {
         title="Produtos"
         subtitle={`${products?.length ?? 0} produtos no cardápio`}
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" onClick={sortAllByPrice}>
+              <ArrowDownNarrowWide size={16} /> Ordenar por preço
+            </Button>
             <Button type="button" variant="secondary" onClick={openCategoryModal}>
               <ListOrdered size={16} /> Categorias
             </Button>
@@ -617,6 +663,13 @@ export function ProductsPage() {
               />
             )}
           </Field>
+          <div>
+            <ImageUploadField
+              label="Foto para o WhatsApp (o bot envia; não muda o cardápio virtual)"
+              value={form.whatsappImageUrl}
+              onChange={(url) => setForm({ ...form, whatsappImageUrl: url })}
+            />
+          </div>
           {error && (
             <p className="rounded-xl bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">{error}</p>
           )}

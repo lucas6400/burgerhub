@@ -68,6 +68,15 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* O Leaflet usa z-index internos próprios (até 800, nos controles de zoom)
+   que vazam por cima do menu lateral/modais do app no mobile, já que
+   .leaflet-container não cria um contexto de empilhamento por padrão.
+   isolation:isolate contém esses z-index dentro do próprio mapa, sem precisar
+   tocar na escala de z-index do resto do app. */
+.leaflet-container {
+  isolation: isolate;
+}
+
 html {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;

@@ -1,6 +1,8 @@
 // Em dev, "/api" é atendido pelo proxy do Vite (vite.config.ts) para o
 // localhost:3333. Em produção (Vercel), a API roda em outro domínio —
 // defina VITE_API_URL com a URL base do projeto da API (sem /api no final).
+import { getCustomerToken } from "./customerAuth";
+
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 const TOKEN_KEY = "burgerhub.token";
@@ -23,7 +25,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = getToken();
+  // Rotas /public/:slug/* são do cardápio do cliente — usam o token de CLIENTE
+  // daquela loja (se logado), nunca o token de staff (evita vazar a sessão do
+  // painel administrativo pro cardápio público, e evita colisão entre os dois).
+  const isPublic = path.startsWith("/public/");
+  const token = isPublic ? getCustomerToken(path.split("/")[2] ?? "") : getToken();
   const isFormData = options.body instanceof FormData;
   const res = await fetch(`${API_BASE}/api${path}`, {
     ...options,

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { LogOut, MapPin, MessageCircle, Navigation, Phone, Send } from "lucide-react";
-import { api } from "../../lib/api";
+import { api, ApiError } from "../../lib/api";
 import { brl } from "../../lib/format";
-import { Button, Card } from "../../components/ui";
+import { Button, Card, Toggle } from "../../components/ui";
 import { useAuth } from "../../stores/auth";
-import { DRIVER_STATUS_LABELS, type DeliveryRow, type DriverRow, type DriverStatus } from "./types";
+import { DRIVER_STATUS_LABELS, type DeliveryOrderSummary, type DeliveryRow, type DriverRow, type DriverStatus } from "./types";
 
 const POLL_MS = 10_000;
 /** Intervalo de localização (item 8 do módulo de entregas): mais frequente enquanto ocupado. */
@@ -21,11 +21,37 @@ const NEXT_ACTION: Partial<Record<DeliveryRow["status"], { label: string; next: 
   ARRIVING: { label: "Entreguei o pedido", next: "DELIVERED" },
 };
 
+// Falha de rede (sem conexão, sinal caindo etc.) não é um ApiError — chega como
+// TypeError puro do fetch, com texto do próprio navegador ("Load failed" no
+// Safari, "Failed to fetch" no Chrome), que não faz sentido mostrar pro usuário.
+function friendlyLoadError(err: unknown) {
+  if (err instanceof ApiError) return err.message;
+  return "Não foi possível conectar. Verifique sua internet e tente novamente.";
+}
+
 function wazeUrl(lat: number, lng: number) {
   return `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
 }
 function googleMapsUrl(lat: number, lng: number) {
-  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+  // "dir" (modo rota) tenta ancorar a coordenada no endereço catalogado mais próximo — em
+  // Palmas isso já jogou entregas de verdade pra uma quadra errada (ex.: "103 Sul") mesmo com o
+  // pino certo. "search" mostra as coordenadas exatas sem tentar adivinhar o nome do lugar.
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+}
+
+// Localização aproximada (geocodificador caiu no centro do bairro — comum nas
+// quadras de Palmas): abrir o pino levaria sempre ao mesmo ponto errado. O
+// Google/Waze entendem o texto do endereço por quadra muito melhor.
+function addressQuery(o: DeliveryOrderSummary) {
+  return [o.addressStreet, o.addressNumber, o.addressNeighborhood, o.addressCity]
+    .filter((p) => p && p !== "S/N" && p !== "Sn")
+    .join(", ");
+}
+function wazeTextUrl(query: string) {
+  return `https://waze.com/ul?q=${encodeURIComponent(query)}&navigate=yes`;
+}
+function googleMapsTextUrl(query: string) {
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(query)}`;
 }
 
 interface ChatMessage {
@@ -134,9 +160,10 @@ export function DriverAppPage() {
       .get<DriverRow>("/driver/me")
       .then((d) => {
         setDriver(d);
+        setError("");
         statusRef.current = d.status;
       })
-      .catch((err) => setError(err instanceof Error ? err.message : "Erro ao carregar"));
+      .catch((err) => setError(friendlyLoadError(err)));
     api
       .get<DeliveryRow[]>("/driver/me/deliveries")
       .then(setDeliveries)
@@ -234,9 +261,14 @@ export function DriverAppPage() {
 
   if (!driver) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-surface-50 dark:bg-surface-950">
+      <div className="flex min-h-screen items-center justify-center bg-surface-50 p-4 dark:bg-surface-950">
         {error ? (
-          <p className="max-w-xs text-center text-sm text-red-500">{error}</p>
+          <div className="max-w-xs text-center">
+            <p className="text-sm text-red-500">{error}</p>
+            <Button type="button" variant="secondary" className="mt-4" onClick={load}>
+              Tentar novamente
+            </Button>
+          </div>
         ) : (
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-brand-500 border-t-transparent" />
         )}
@@ -266,14 +298,7 @@ export function DriverAppPage() {
               {isOnline ? "Recebendo entregas normalmente" : "Fique online pra começar a receber pedidos"}
             </p>
           </div>
-          <button
-            onClick={toggleOnline}
-            className={`relative h-8 w-14 shrink-0 rounded-full transition-colors ${isOnline ? "bg-emerald-500" : "bg-surface-300 dark:bg-surface-700"}`}
-          >
-            <span
-              className={`absolute top-1 h-6 w-6 rounded-full bg-white shadow transition-transform ${isOnline ? "translate-x-7" : "translate-x-1"}`}
-            />
-          </button>
+          <Toggle checked={isOnline} onChange={toggleOnline} />
         </Card>
 
         {error && (
@@ -287,10 +312,13 @@ export function DriverAppPage() {
             </p>
           </Card>
         ) : (
-          deliveries.map((d) => {
+          deliveries.map((d, i) => {
             const isPending = d.status === "DRIVER_ASSIGNED";
             const action = NEXT_ACTION[d.status];
             const totalStops = deliveries.filter((x) => x.stopSequence != null).length;
+            // A lista já vem ordenada por stopSequence (API) — o primeiro card é
+            // sempre pra onde ir agora, não precisa o entregador comparar números.
+            const isNextStop = i === 0 && totalStops > 1;
             const destination =
               d.status === "HEADING_TO_STORE"
                 ? { lat: d.pickupLat, lng: d.pickupLng, label: "loja" }
@@ -299,17 +327,31 @@ export function DriverAppPage() {
                   : null;
 
             return (
-              <Card key={d.id} className={`p-4 ${isPending ? "border-2 border-brand-400" : ""}`}>
+              <Card
+                key={d.id}
+                className={`p-4 ${isPending ? "border-2 border-brand-400" : isNextStop ? "border-2 border-emerald-400" : ""}`}
+              >
                 {isPending && (
                   <p className="mb-2 text-xs font-bold uppercase tracking-wide text-brand-600 dark:text-brand-400">
                     🔔 Nova entrega
+                  </p>
+                )}
+                {isNextStop && (
+                  <p className="mb-2 flex items-center gap-1 text-xs font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                    👉 Vá pra cá primeiro
                   </p>
                 )}
                 <div className="mb-2 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <p className="text-base font-bold">Pedido #{d.order.number}</p>
                     {d.stopSequence != null && totalStops > 1 && (
-                      <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[11px] font-bold text-blue-600 dark:text-blue-400">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                          isNextStop
+                            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                            : "bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                        }`}
+                      >
                         {d.stopSequence}ª parada de {totalStops}
                       </span>
                     )}
@@ -317,9 +359,16 @@ export function DriverAppPage() {
                   <p className="text-sm font-semibold text-brand-600 dark:text-brand-400">{brl(d.order.totalCents)}</p>
                 </div>
                 <p className="text-sm font-medium">{d.order.customer?.name ?? "Cliente"}</p>
-                <p className="mb-3 flex items-center gap-1 text-xs text-surface-500">
+                <p className="flex items-center gap-1 text-xs text-surface-500">
                   <MapPin size={12} />
                   {d.order.addressStreet}, {d.order.addressNumber} — {d.order.addressNeighborhood}
+                </p>
+                <p className={d.order.deliveryLocationPrecise === false ? "mb-3 mt-1.5" : "mb-3"}>
+                  {d.order.deliveryLocationPrecise === false && (
+                    <span className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-2 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                      ⚠️ Localização aproximada — confirme o endereço com o cliente antes de sair
+                    </span>
+                  )}
                 </p>
 
                 <div className="mb-3 flex gap-2">
@@ -334,7 +383,11 @@ export function DriverAppPage() {
                   {destination && (
                     <>
                       <a
-                        href={wazeUrl(destination.lat, destination.lng)}
+                        href={
+                          d.order.deliveryLocationPrecise === false
+                            ? wazeTextUrl(addressQuery(d.order))
+                            : wazeUrl(destination.lat, destination.lng)
+                        }
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-surface-200 py-2 text-xs font-medium text-surface-600 dark:border-surface-700 dark:text-surface-300"
@@ -342,7 +395,11 @@ export function DriverAppPage() {
                         <Navigation size={13} /> Waze
                       </a>
                       <a
-                        href={googleMapsUrl(destination.lat, destination.lng)}
+                        href={
+                          d.order.deliveryLocationPrecise === false
+                            ? googleMapsTextUrl(addressQuery(d.order))
+                            : googleMapsUrl(destination.lat, destination.lng)
+                        }
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-surface-200 py-2 text-xs font-medium text-surface-600 dark:border-surface-700 dark:text-surface-300"

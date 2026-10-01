@@ -105,6 +105,7 @@ export function Badge({
 }
 
 export const statusBadgeColor: Record<string, keyof typeof badgeColors> = {
+  AWAITING_PAYMENT: "amber",
   NEW: "blue",
   PREPARING: "amber",
   FINISHING: "amber",

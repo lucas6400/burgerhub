@@ -23,9 +23,15 @@ import { FinancePage } from "./pages/Finance";
 import { ReportsPage } from "./pages/Reports";
 import { SettingsPage } from "./pages/Settings";
 import { WhatsAppPage } from "./pages/WhatsApp";
+import { ConversationsPage } from "./pages/Conversations";
+import { LeadsPage } from "./pages/Leads";
+import { BotReviewPage } from "./pages/BotReview";
+import { OriginsPage } from "./pages/Origins";
+import { QuickSalePage } from "./pages/QuickSale";
 import { PublicMenuPage } from "./pages/menu/PublicMenu";
 import { ReviewPage } from "./pages/menu/ReviewPage";
 import { TrackOrderPage } from "./pages/menu/TrackOrder";
+import { CustomerAuthLayout } from "./stores/customerAuth";
 
 export function App() {
   return (
@@ -37,9 +43,11 @@ export function App() {
       <Route path="/esqueci-senha" element={<ForgotPasswordPage />} />
       <Route path="/redefinir-senha" element={<ResetPasswordPage />} />
       <Route path="/motoboy" element={<DriverAppPage />} />
-      <Route path="/cardapio/:slug" element={<PublicMenuPage />} />
-      <Route path="/cardapio/:slug/pedido/:orderId" element={<TrackOrderPage />} />
-      <Route path="/cardapio/:slug/avaliar/:orderId" element={<ReviewPage />} />
+      <Route element={<CustomerAuthLayout />}>
+        <Route path="/cardapio/:slug" element={<PublicMenuPage />} />
+        <Route path="/cardapio/:slug/pedido/:orderId" element={<TrackOrderPage />} />
+        <Route path="/cardapio/:slug/avaliar/:orderId" element={<ReviewPage />} />
+      </Route>
       <Route element={<AppShell />}>
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/pedidos" element={<OrdersPage />} />
@@ -50,6 +58,11 @@ export function App() {
         <Route path="/mesas" element={<TablesPage />} />
         <Route path="/kds" element={<KdsPage />} />
         <Route path="/whatsapp" element={<WhatsAppPage />} />
+        <Route path="/atendimento" element={<ConversationsPage />} />
+        <Route path="/leads" element={<LeadsPage />} />
+        <Route path="/revisao" element={<BotReviewPage />} />
+        <Route path="/origem" element={<OriginsPage />} />
+        <Route path="/lancar" element={<QuickSalePage />} />
         <Route path="/produtos" element={<ProductsPage />} />
         <Route path="/clientes" element={<CustomersPage />} />
         <Route path="/cupons" element={<CouponsPage />} />

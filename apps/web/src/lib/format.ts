@@ -2,6 +2,13 @@ export function brl(cents: number): string {
   return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+/** Link "wa.me" pro WhatsApp pessoal/comercial do lojista — funciona mesmo sem a API oficial conectada. */
+export function waLink(phone: string, text: string): string {
+  const digits = phone.replace(/\D/g, "");
+  const withCountryCode = digits.startsWith("55") ? digits : `55${digits}`;
+  return `https://wa.me/${withCountryCode}?text=${encodeURIComponent(text)}`;
+}
+
 export function parseBrl(value: string): number {
   const clean = value.replace(/[^\d,.-]/g, "").replace(".", "").replace(",", ".");
   return Math.round(parseFloat(clean || "0") * 100);
@@ -57,6 +64,7 @@ export function elapsedMinutes(date: string | Date): number {
 }
 
 export const ORDER_STATUS_LABELS: Record<string, string> = {
+  AWAITING_PAYMENT: "Aguardando pagamento",
   NEW: "Novo",
   PREPARING: "Preparando",
   FINISHING: "Finalizando",

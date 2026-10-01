@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DollarSign, Printer, Search, ShoppingBag } from "lucide-react";
+import { DollarSign, MessageCircle, Printer, Search, ShoppingBag } from "lucide-react";
 import { api } from "../lib/api";
 import { printOrder } from "../lib/print";
 import { useAuth } from "../stores/auth";
@@ -9,6 +9,7 @@ import {
   ORDER_STATUS_LABELS,
   ORDER_TYPE_LABELS,
   PAYMENT_LABELS,
+  waLink,
 } from "../lib/format";
 import {
   Badge,
@@ -24,6 +25,25 @@ import {
   statusBadgeColor,
 } from "../components/ui";
 import type { Order } from "../types";
+
+/** Próxima etapa do pedido pra quem trabalha sem a tela de Cozinha (KDS): tudo pelo celular. */
+function nextStepFor(order: Order): { to: string; label: string } | null {
+  switch (order.status) {
+    case "NEW":
+      return { to: "PREPARING", label: "🔥 Iniciar preparo" };
+    case "PREPARING":
+    case "FINISHING":
+      return { to: "READY", label: "✅ Pedido pronto" };
+    case "READY":
+      return order.type === "DELIVERY"
+        ? { to: "OUT_FOR_DELIVERY", label: "🛵 Saiu para entrega" }
+        : { to: "DELIVERED", label: "🤝 Entregue ao cliente" };
+    case "OUT_FOR_DELIVERY":
+      return { to: "DELIVERED", label: "🏠 Entregue" };
+    default:
+      return null;
+  }
+}
 
 export function OrdersPage() {
   const { tenant } = useAuth();
@@ -157,14 +177,52 @@ export function OrdersPage() {
                   {selected.paymentStatus === "PAID" ? "✓ Pago online" : "Aguardando pagamento"}
                 </Badge>
               )}
+              {selected.paymentReviewRequired && <Badge color="red">⚠️ Revisar pagamento</Badge>}
               <Badge color={selected.source === "WHATSAPP" ? "green" : "blue"}>
                 {selected.source === "WHATSAPP" ? "WhatsApp" : selected.source === "MENU" ? "Cardápio" : selected.source}
               </Badge>
             </div>
 
             <div className="rounded-xl bg-surface-50 p-3 text-sm dark:bg-surface-850">
-              <p className="font-medium">{selected.customer?.name}</p>
-              <p className="text-surface-500">{selected.customer?.phone}</p>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="font-medium">{selected.customer?.name}</p>
+                  <p className="text-surface-500">{selected.customer?.phone}</p>
+                </div>
+                {selected.customer?.phone && (
+                  <a
+                    href={waLink(
+                      selected.customer.phone,
+                      `Olá ${selected.customer.name}! Vi aqui que chegou seu pedido #${selected.number} (${brl(selected.totalCents)}) 🍔 Já estamos cuidando dele!`,
+                    )}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex shrink-0 items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white"
+                  >
+                    <MessageCircle size={13} /> WhatsApp
+                  </a>
+                )}
+              </div>
+              {selected.type === "DELIVERY" && selected.deliveryLat != null && selected.deliveryLng != null && (
+                <div className="mt-1 flex flex-wrap gap-3">
+                  <a
+                    href={`https://waze.com/ul?ll=${selected.deliveryLat},${selected.deliveryLng}&navigate=yes`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-semibold text-brand-600 underline"
+                  >
+                    🗺️ Abrir no Waze
+                  </a>
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${selected.deliveryLat},${selected.deliveryLng}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-semibold text-brand-600 underline"
+                  >
+                    🗺️ Abrir no Google Maps
+                  </a>
+                </div>
+              )}
               {selected.addressStreet && (
                 <p className="mt-1 text-surface-500">
                   📍 {selected.addressStreet}, {selected.addressNumber} — {selected.addressNeighborhood}
@@ -268,22 +326,60 @@ export function OrdersPage() {
               </Button>
               {!["DELIVERED", "SETTLED", "CANCELED"].includes(selected.status) && (
                 <>
-                  <Button
-                    className="sm:flex-1"
-                    disabled={!selected.paymentMethod}
-                    title={!selected.paymentMethod ? "Cobre a comanda antes de concluir o pedido" : undefined}
-                    onClick={async () => {
-                      const updated = await api.patch<Order>(`/orders/${selected.id}/status`, {
-                        status: "DELIVERED",
-                      });
-                      setSelected(updated);
-                      setOrders((prev) =>
-                        prev?.map((o) => (o.id === selected.id ? updated : o)) ?? null,
-                      );
-                    }}
-                  >
-                    Marcar como concluído
-                  </Button>
+                  {selected.status === "AWAITING_PAYMENT" ? (
+                    <Button
+                      className="sm:flex-1"
+                      onClick={async () => {
+                        const updated = await api.patch<Order>(`/orders/${selected.id}/status`, {
+                          status: "NEW",
+                        });
+                        setSelected(updated);
+                        setOrders((prev) =>
+                          prev?.map((o) => (o.id === selected.id ? updated : o)) ?? null,
+                        );
+                      }}
+                    >
+                      Liberar pedido
+                    </Button>
+                  ) : (
+                    <>
+                      {nextStepFor(selected) && (
+                        <Button
+                          className="sm:flex-1"
+                          disabled={nextStepFor(selected)!.to === "DELIVERED" && !selected.paymentMethod}
+                          title={nextStepFor(selected)!.to === "DELIVERED" && !selected.paymentMethod ? "Cobre a comanda antes de concluir o pedido" : undefined}
+                          onClick={async () => {
+                            const updated = await api.patch<Order>(`/orders/${selected.id}/status`, {
+                              status: nextStepFor(selected)!.to,
+                            });
+                            setSelected(updated);
+                            setOrders((prev) =>
+                              prev?.map((o) => (o.id === selected.id ? updated : o)) ?? null,
+                            );
+                          }}
+                        >
+                          {nextStepFor(selected)!.label}
+                        </Button>
+                      )}
+                      <Button
+                        variant="secondary"
+                        className="sm:flex-1"
+                        disabled={!selected.paymentMethod}
+                        title={!selected.paymentMethod ? "Cobre a comanda antes de concluir o pedido" : "Fecha o pedido direto, sem passar pelas etapas"}
+                        onClick={async () => {
+                          const updated = await api.patch<Order>(`/orders/${selected.id}/status`, {
+                            status: "DELIVERED",
+                          });
+                          setSelected(updated);
+                          setOrders((prev) =>
+                            prev?.map((o) => (o.id === selected.id ? updated : o)) ?? null,
+                          );
+                        }}
+                      >
+                        Concluir direto
+                      </Button>
+                    </>
+                  )}
                   <Button
                     variant="danger"
                     className="sm:flex-1"

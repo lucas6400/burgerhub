@@ -8,6 +8,11 @@ import {
   ExternalLink,
   LayoutDashboard,
   LogOut,
+  Filter,
+  Headset,
+  ShieldAlert,
+  TrendingUp,
+  Zap,
   Menu,
   MessageCircle,
   Moon,
@@ -26,9 +31,11 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../stores/auth";
 import { useNewOrderAlert } from "../../hooks/useNewOrderAlert";
+import { useUnreadConversations } from "../../hooks/useUnreadConversations";
 
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, end: true },
+  { to: "/lancar", label: "Lançar venda rápida", icon: Zap, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/pdv", label: "PDV — Balcão", icon: Store },
   { to: "/mesas", label: "Mesas", icon: Table2 },
   { to: "/pedidos", label: "Pedidos", icon: ShoppingBag },
@@ -36,6 +43,10 @@ const NAV_ITEMS = [
   { to: "/entregas-metricas", label: "Métricas de Entrega", icon: Activity, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/entregadores", label: "Entregadores", icon: Bike, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/kds", label: "Cozinha (KDS)", icon: ChefHat },
+  { to: "/atendimento", label: "Central de Atendimento", icon: Headset, hideForRoles: ["KITCHEN", "COURIER"] },
+  { to: "/leads", label: "Leads", icon: Filter, hideForRoles: ["KITCHEN", "COURIER"] },
+  { to: "/revisao", label: "Revisão do bot", icon: ShieldAlert, hideForRoles: ["KITCHEN", "COURIER"] },
+  { to: "/origem", label: "Origem dos pedidos", icon: TrendingUp, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle },
   { to: "/produtos", label: "Produtos", icon: UtensilsCrossed },
   { to: "/clientes", label: "Clientes", icon: Users },
@@ -65,8 +76,21 @@ export function AppShell() {
   const { dark, toggle } = useDarkMode();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const newOrderCount = useNewOrderAlert(tenant);
+  const unreadConversations = useUnreadConversations();
   const navigate = useNavigate();
   const kdsEnabled = tenant?.settings?.kdsEnabled ?? true;
+
+  // Manifesto próprio do painel (escopo "/", diferente do /motoboy) — necessário
+  // pra "Adicionar à tela de início" funcionar aqui, o que por sua vez é exigido
+  // pelo iOS pra notificação push funcionar fora de uma aba comum do Safari.
+  useEffect(() => {
+    const link = document.querySelector('link[rel="manifest"]');
+    const previous = link?.getAttribute("href");
+    link?.setAttribute("href", "/manifest-admin.webmanifest");
+    return () => {
+      if (previous) link?.setAttribute("href", previous);
+    };
+  }, []);
 
   useEffect(() => {
     if (loading) return;
@@ -117,6 +141,11 @@ export function AppShell() {
             {to === "/pedidos" && newOrderCount > 0 && (
               <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-bold text-white">
                 {newOrderCount}
+              </span>
+            )}
+            {to === "/atendimento" && unreadConversations > 0 && (
+              <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-bold text-white">
+                {unreadConversations}
               </span>
             )}
           </NavLink>

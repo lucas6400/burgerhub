@@ -82,7 +82,11 @@ export interface DeliveryOrderSummary {
   addressStreet?: string | null;
   addressNumber?: string | null;
   addressNeighborhood?: string | null;
+  addressCity?: string | null;
+  addressComplement?: string | null;
   customer?: { name: string; phone: string } | null;
+  /** false = geocodificação caiu pro nível de bairro (endereço por quadra) — pino pode estar impreciso. */
+  deliveryLocationPrecise?: boolean;
 }
 
 export interface DeliveryRow {

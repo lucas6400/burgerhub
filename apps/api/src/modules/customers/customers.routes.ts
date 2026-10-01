@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { h } from "../../lib/http.js";
-import { requireAuth, tenantOf } from "../../middlewares/auth.js";
+import { requireAuth, requireRole, tenantOf } from "../../middlewares/auth.js";
 import { AppError } from "../../middlewares/error.js";
 
 export const customersRoutes = Router();
@@ -56,9 +56,10 @@ customersRoutes.get(
         const lastOrderAt = c.orders.length
           ? c.orders.reduce((max, o) => (o.createdAt > max ? o.createdAt : max), c.orders[0].createdAt)
           : null;
-        const { orders, ...rest } = c;
+        const { orders, passwordHash, ...rest } = c;
         return {
           ...rest,
+          hasAppAccess: !!passwordHash,
           ordersCount: orders.length,
           totalSpentCents: totalSpent,
           avgTicketCents: orders.length ? Math.round(totalSpent / orders.length) : 0,
@@ -85,7 +86,8 @@ customersRoutes.get(
       },
     });
     if (!customer) throw new AppError(404, "Cliente não encontrado");
-    res.json(customer);
+    const { passwordHash, ...rest } = customer;
+    res.json({ ...rest, hasAppAccess: !!passwordHash });
   }),
 );
 
@@ -106,7 +108,8 @@ customersRoutes.post(
         tenantId,
       },
     });
-    res.status(201).json(customer);
+    const { passwordHash, ...rest } = customer;
+    res.status(201).json({ ...rest, hasAppAccess: !!passwordHash });
   }),
 );
 
@@ -124,7 +127,8 @@ customersRoutes.put(
       where: { id: existing.id },
       data: { ...data, birthDate: data.birthDate ? new Date(data.birthDate) : undefined },
     });
-    res.json(customer);
+    const { passwordHash, ...rest } = customer;
+    res.json({ ...rest, hasAppAccess: !!passwordHash });
   }),
 );
 
@@ -161,6 +165,55 @@ customersRoutes.post(
       data: { ...data, customerId: customer.id },
     });
     res.status(201).json(address);
+  }),
+);
+
+/** Zera a senha do app do cliente — ele precisa "criar conta" de novo com o mesmo telefone pra voltar a acessar. */
+customersRoutes.post(
+  "/:id/reset-app-access",
+  requireRole("MANAGER"),
+  h(async (req, res) => {
+    const { count } = await prisma.customer.updateMany({
+      where: { id: req.params.id, tenantId: tenantOf(req) },
+      data: { passwordHash: null },
+    });
+    if (!count) throw new AppError(404, "Cliente não encontrado");
+    res.json({ ok: true });
+  }),
+);
+
+/**
+ * Marca a recompensa do "compre X, leve Y" como entregue: zera o contador do
+ * cliente e registra no histórico. Sempre manual — esse tipo de programa não
+ * tem resgate automático no checkout (ver LoyaltyTab.tsx).
+ */
+customersRoutes.post(
+  "/:id/redeem-buy-x-get-y",
+  requireRole("MANAGER"),
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const customer = await prisma.customer.findFirst({ where: { id: req.params.id, tenantId } });
+    if (!customer) throw new AppError(404, "Cliente não encontrado");
+
+    const program = await prisma.loyaltyProgram.findUnique({ where: { tenantId } });
+    if (!program || program.type !== "BUY_X_GET_Y") {
+      throw new AppError(400, "O programa de fidelidade atual não é do tipo compre X, leve Y");
+    }
+    if (customer.buyXProgress < program.buyX) {
+      throw new AppError(409, `Esse cliente ainda não completou os ${program.buyX} pedidos necessários`);
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.customer.update({
+        where: { id: customer.id },
+        data: { buyXProgress: { decrement: program.buyX } },
+      });
+      await tx.loyaltyTransaction.create({
+        data: { customerId: customer.id, type: "REDEEM", points: program.buyX },
+      });
+      return result;
+    });
+    res.json({ ok: true, buyXProgress: updated.buyXProgress });
   }),
 );
 

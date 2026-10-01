@@ -64,6 +64,8 @@ export interface Order {
   totalCents: number;
   paymentMethod: string | null;
   paymentStatus: string;
+  pixReceiptAttempts?: number;
+  paymentReviewRequired?: boolean;
   changeForCents?: number | null;
   couponCode?: string | null;
   notes?: string | null;
@@ -72,6 +74,8 @@ export interface Order {
   addressNeighborhood?: string | null;
   addressCity?: string | null;
   addressComplement?: string | null;
+  deliveryLat?: number | null;
+  deliveryLng?: number | null;
   createdAt: string;
   customer?: Customer | null;
   table?: { number: number } | null;
@@ -85,6 +89,7 @@ export interface Product {
   priceCents: number;
   promoPriceCents?: number | null;
   imageUrl?: string | null;
+  whatsappImageUrl?: string | null;
   categoryId: string;
   available: boolean;
   showInKds: boolean;

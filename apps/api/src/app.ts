@@ -16,7 +16,10 @@ import { stockRoutes } from "./modules/stock/stock.routes.js";
 import { financeRoutes } from "./modules/finance/finance.routes.js";
 import { settingsRoutes } from "./modules/settings/settings.routes.js";
 import { publicRoutes } from "./modules/public/public.routes.js";
+import { customerAuthRoutes } from "./modules/customer-auth/customer-auth.routes.js";
+import { pushRoutes } from "./modules/push/push.routes.js";
 import { whatsappRoutes } from "./modules/whatsapp/whatsapp.routes.js";
+import { conversationsRoutes } from "./modules/conversations/conversations.routes.js";
 import { paymentsRoutes } from "./modules/payments/payments.routes.js";
 import { uploadsRoutes } from "./modules/uploads/uploads.routes.js";
 import { tablesRoutes } from "./modules/tables/tables.routes.js";
@@ -47,7 +50,9 @@ export function createApp() {
   app.use("/api/finance", financeRoutes);
   app.use("/api/settings", settingsRoutes);
   app.use("/api/public", publicRoutes);
+  app.use("/api/public", customerAuthRoutes);
   app.use("/api/whatsapp", whatsappRoutes);
+  app.use("/api/conversations", conversationsRoutes);
   app.use("/api/payments", paymentsRoutes);
   app.use("/api/uploads", uploadsRoutes);
   app.use("/api/tables", tablesRoutes);
@@ -55,6 +60,7 @@ export function createApp() {
   app.use("/api/drivers", driversRoutes);
   app.use("/api/deliveries", deliveriesRoutes);
   app.use("/api/driver", driverSelfRoutes);
+  app.use("/api/push", pushRoutes);
 
   app.use(errorHandler);
   return app;

@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Crosshair, MapPin, Plus, QrCode, Trash2 } from "lucide-react";
+import { Crosshair, MapPin, Pencil, Plus, QrCode, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import { brl, formatCep, parseBrl, ROLE_LABELS } from "../lib/format";
 import { useAuth } from "../stores/auth";
 import { LocationPickerMap } from "../components/LocationPickerMap";
+import { ZonePolygonMap, ZONE_COLORS, type ZonePoint } from "../components/ZonePolygonMap";
+import { ZonesOverviewMap } from "../components/ZonesOverviewMap";
+import { StoreStatusControl } from "../components/StoreStatusControl";
 import { ImageUploadField } from "../components/ImageUploadField";
 import { isDesktopApp } from "../lib/print";
+import { disablePushNotifications, enablePushNotifications, getPushSubscriptionStatus, pushSupported } from "../lib/push";
 import { AuditLogTab } from "./settings/AuditLogTab";
 import { LoyaltyTab } from "./settings/LoyaltyTab";
 import {
@@ -19,6 +23,7 @@ import {
   PageHeader,
   Select,
   Skeleton,
+  Textarea,
   Toggle,
 } from "../components/ui";
 
@@ -32,11 +37,20 @@ interface SettingsData {
     address?: string | null;
     instagram?: string | null;
     pixKey?: string | null;
+    pixReceiptExpectedName?: string | null;
+    pixReceiptExpectedBank?: string | null;
+    botAutoPixEnabled?: boolean;
+    pixGateEnabled?: boolean;
+    metaPixelId?: string | null;
+    customHeadScript?: string | null;
     acceptsDelivery: boolean;
     acceptsPickup: boolean;
     acceptsDineIn: boolean;
     kdsEnabled: boolean;
     autoPrint: boolean;
+    orderAlertPhone?: string | null;
+    deliveryAreasDescription?: string | null;
+    deliveryNotServedText?: string | null;
     defaultPrepMinutes: number;
     minOrderCents: number;
     freeDeliveryAbove?: number | null;
@@ -57,6 +71,14 @@ interface SettingsData {
   deliveryRadiusTiers: {
     id: string;
     maxKm: number;
+    feeCents: number;
+    etaMinutes: number;
+    active: boolean;
+  }[];
+  deliveryZones: {
+    id: string;
+    name: string;
+    polygon: ZonePoint[];
     feeCents: number;
     etaMinutes: number;
     active: boolean;
@@ -103,6 +125,15 @@ export function SettingsPage() {
   const [tierModal, setTierModal] = useState(false);
   const [userModal, setUserModal] = useState(false);
   const [tierForm, setTierForm] = useState({ maxKm: "", fee: "", eta: "45" });
+  const [zoneModal, setZoneModal] = useState(false);
+  const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
+  const [showZonesMap, setShowZonesMap] = useState(false);
+  const [zoneForm, setZoneForm] = useState<{ name: string; fee: string; eta: string; points: ZonePoint[] }>({
+    name: "",
+    fee: "",
+    eta: "45",
+    points: [],
+  });
   const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "ATTENDANT" });
   const [locating, setLocating] = useState(false);
   const [locateError, setLocateError] = useState("");
@@ -115,6 +146,27 @@ export function SettingsPage() {
   const [cepLoading, setCepLoading] = useState(false);
   const [cepError, setCepError] = useState("");
   const addressInputRef = useRef<HTMLInputElement>(null);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushError, setPushError] = useState("");
+  const [pushSaving, setPushSaving] = useState(false);
+
+  useEffect(() => {
+    getPushSubscriptionStatus().then((status) => setPushEnabled(status === "subscribed"));
+  }, []);
+
+  async function togglePush(next: boolean) {
+    setPushSaving(true);
+    setPushError("");
+    try {
+      if (next) await enablePushNotifications();
+      else await disablePushNotifications();
+      setPushEnabled(next);
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : "Erro ao configurar notificação");
+    } finally {
+      setPushSaving(false);
+    }
+  }
 
   function load() {
     api.get<SettingsData>("/settings").then(setData).catch(console.error);
@@ -348,6 +400,7 @@ export function SettingsPage() {
       </div>
 
       {tab === "Geral" && (
+        <>
         <Card className="max-w-2xl space-y-4 p-5">
           <Field label="Nome do restaurante">
             <Input
@@ -413,6 +466,50 @@ export function SettingsPage() {
             </Field>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Nome esperado no comprovante Pix">
+              <Input
+                defaultValue={s.pixReceiptExpectedName ?? ""}
+                onBlur={(e) => saveSettings({ pixReceiptExpectedName: e.target.value || null })}
+              />
+              <p className="mt-0.5 text-xs text-surface-500">
+                Usado pra conferir automaticamente comprovantes enviados no WhatsApp. Em branco, esse critério não é verificado.
+              </p>
+            </Field>
+            <Field label="Banco esperado no comprovante Pix">
+              <Input
+                defaultValue={s.pixReceiptExpectedBank ?? ""}
+                onBlur={(e) => saveSettings({ pixReceiptExpectedBank: e.target.value || null })}
+                placeholder="Ex.: Nubank, Banco Inter, Itaú"
+              />
+              <p className="mt-0.5 text-xs text-surface-500">
+                Em branco, esse critério não é verificado — só o valor do pedido é conferido.
+              </p>
+            </Field>
+            <div className="space-y-2 rounded-xl border border-surface-200 p-3 dark:border-surface-700 sm:col-span-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-surface-400">
+                Cobrança de Pix pelo WhatsApp (em standby)
+              </p>
+              <Toggle
+                checked={!!s.botAutoPixEnabled}
+                onChange={(v) => saveSettings({ botAutoPixEnabled: v })}
+                label="Pix automático no bot (Mercado Pago)"
+              />
+              <p className="pl-0.5 text-xs text-surface-400">
+                Desligado: o bot manda a sua chave Pix e a confirmação do pagamento é manual, como sempre foi.
+                Ligado: o bot gera o Pix copia-e-cola do Mercado Pago e confirma sozinho quando cair.
+              </p>
+              <Toggle
+                checked={!!s.pixGateEnabled}
+                onChange={(v) => saveSettings({ pixGateEnabled: v })}
+                label="Entrega no Pix só vai pra cozinha depois do pagamento"
+              />
+              <p className="pl-0.5 text-xs text-surface-400">
+                Desligado: o pedido entra direto na produção. Ligado: pedido de entrega no Pix pelo WhatsApp fica em
+                "Aguardando pagamento" até o Pix ser confirmado (automático, por comprovante lido pela IA ou por você).
+              </p>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Tempo médio de preparo (min)">
               <Input
                 type="number"
@@ -470,13 +567,97 @@ export function SettingsPage() {
                 : "Sem configurar o navegador em modo kiosk de impressão, ainda aparece a caixa de confirmação de impressão; use o app desktop do BurgerHub pra imprimir 100% sozinho, sem essa etapa."}
             </p>
             {isDesktopApp() && <DesktopPrinterField />}
-            <Toggle
-              checked={s.isOpenOverride === true}
-              onChange={(v) => saveSettings({ isOpenOverride: v ? true : null })}
-              label="Forçar loja ABERTA (ignora horários)"
-            />
+            <Field label="Avisar pedido novo por WhatsApp (sem impressora)">
+              <Input
+                defaultValue={s.orderAlertPhone ?? ""}
+                onBlur={(e) => saveSettings({ orderAlertPhone: e.target.value.trim() || null })}
+                placeholder="(63) 98400-0289"
+              />
+              <p className="mt-0.5 text-xs text-surface-500">
+                Preenchendo, todo pedido novo que chegar sozinho (cardápio, WhatsApp ou mesa) manda um resumo pra
+                esse número, como se fosse um cupom de cozinha — útil enquanto você ainda não tem impressora.
+                Pedido lançado direto no PDV não entra, já que o atendente já está vendo na hora. Deixe em branco
+                pra desativar.
+              </p>
+            </Field>
+            <div>
+              <p className="mb-1.5 text-sm font-medium">Status da loja agora</p>
+              <StoreStatusControl />
+              <p className="mt-1.5 text-xs text-surface-400">
+                Pra fechar a loja no meio do expediente (imprevisto, acabou o estoque etc.), use "Forçar fechada" aqui —
+                editar a grade de horários muda todos os dias da semana, não só hoje.
+              </p>
+            </div>
           </div>
         </Card>
+
+        <Card className="mt-4 max-w-2xl space-y-4 p-5">
+          <div>
+            <h3 className="text-sm font-semibold">Rastreamento de vendas no cardápio digital</h3>
+            <p className="mt-0.5 text-xs text-surface-500">
+              Acompanhe seus anúncios sabendo quando um pedido de verdade acontece. Roda só na página pública do
+              cardápio, nunca aqui no painel.
+            </p>
+          </div>
+          <Field label="Meta Pixel ID">
+            <Input
+              defaultValue={s.metaPixelId ?? ""}
+              onBlur={(e) => saveSettings({ metaPixelId: e.target.value.trim() || null })}
+              placeholder="123456789012345"
+              inputMode="numeric"
+            />
+          </Field>
+          <p className="-mt-2 text-xs text-surface-400">
+            Encontre em business.facebook.com → Gerenciador de Eventos. Com isso preenchido, o cardápio já dispara
+            "PageView" e "Purchase" (com o valor do pedido) sozinho pros seus anúncios do Instagram/Facebook.
+          </p>
+          <Field label="Script personalizado (avançado)">
+            <Textarea
+              rows={4}
+              defaultValue={s.customHeadScript ?? ""}
+              onBlur={(e) => saveSettings({ customHeadScript: e.target.value.trim() || null })}
+              placeholder="<script>...</script> — pixel do TikTok, Google Ads, GA4 ou outro"
+              className="font-mono text-xs"
+            />
+          </Field>
+          <p className="-mt-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+            ⚠️ Esse código roda no navegador do seu cliente, na mesma página onde ele paga com cartão. Cole aqui{" "}
+            <strong>só scripts de fontes oficiais</strong> (Meta, TikTok, Google Ads, GA4) — nunca algo que alguém
+            te mandou pronto ou baixou de um lugar não confiável.
+          </p>
+          <p className="-mt-2 text-xs text-surface-400">
+            Pra saber quando um pedido foi feito no seu script, escute:{" "}
+            <code className="rounded bg-surface-100 px-1 py-0.5 dark:bg-surface-800">
+              document.addEventListener("burgerhub:order_placed", (e) =&gt; {"{"} e.detail.valueBRL {"}"})
+            </code>
+            .
+          </p>
+        </Card>
+
+        <Card className="mt-4 max-w-2xl space-y-3 p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold">Notificação de pedido novo no navegador</h3>
+              <p className="mt-0.5 text-xs text-surface-500">
+                Recebe um alerta no celular/computador quando chega pedido, mesmo com o painel fechado.
+              </p>
+            </div>
+            <Toggle checked={pushEnabled} onChange={togglePush} />
+          </div>
+          {!pushSupported() && (
+            <p className="rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+              Esse navegador não suporta notificação push.
+            </p>
+          )}
+          {pushError && <p className="text-xs text-red-500">{pushError}</p>}
+          {pushSaving && <p className="text-xs text-surface-400">Aguarde...</p>}
+          <p className="text-xs text-surface-400">
+            No <strong>iPhone</strong>, primeiro adicione esse painel à tela de início (compartilhar → "Adicionar à
+            Tela de Início") — o iOS só entrega notificação push pra um app instalado assim, uma aba comum do Safari
+            não recebe. No Android funciona direto, sem precisar instalar nada.
+          </p>
+        </Card>
+        </>
       )}
 
       {tab === "Horários" && (
@@ -589,6 +770,28 @@ export function SettingsPage() {
           </Card>
 
           <Card className="p-5">
+            <Field label="Regiões que você atende (o bot usa isso pra responder o cliente)">
+              <Input
+                defaultValue={s.deliveryAreasDescription ?? ""}
+                onBlur={(e) => saveSettings({ deliveryAreasDescription: e.target.value.trim() || null })}
+                placeholder="Ex.: região Norte, Centro e algumas áreas da região Sul de Palmas"
+                maxLength={300}
+              />
+            </Field>
+            <div className="mt-3">
+              <Field label="Onde você NÃO entrega (o bot avisa logo no começo da conversa)">
+                <Input
+                  defaultValue={s.deliveryNotServedText ?? ""}
+                  onBlur={(e) => saveSettings({ deliveryNotServedText: e.target.value.trim() || null })}
+                  placeholder="Ex.: Taquaralto e as quadras do outro lado, por serem muito distantes"
+                  maxLength={300}
+                />
+              </Field>
+            </div>
+            <p className="mb-4 mt-1 text-xs text-surface-400">
+              Quando o cliente perguntar "vocês entregam aqui?" ou "entrega grátis?", o bot descreve essas regiões e pede a
+              localização pra confirmar. A taxa continua sendo calculada pelas zonas e faixas abaixo.
+            </p>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Raio máximo de entrega (km)">
                 <Input
@@ -646,6 +849,92 @@ export function SettingsPage() {
               {data.deliveryRadiusTiers.length === 0 && (
                 <p className="py-4 text-center text-sm text-surface-400">
                   Nenhuma faixa cadastrada — a entrega ficará indisponível até criar ao menos uma.
+                </p>
+              )}
+            </div>
+          </Card>
+
+          <Card className="p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold">Zonas de entrega (desenhadas no mapa)</h3>
+                <p className="text-xs text-surface-500">
+                  Marque uma área no mapa com um preço próprio — útil quando distância em linha reta
+                  não reflete sua região real (ex.: entrega grátis só num bairro específico). Endereço
+                  fora de toda zona cai nas faixas por distância acima.
+                </p>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setEditingZoneId(null);
+                  setZoneForm({ name: "", fee: "", eta: "45", points: [] });
+                  setZoneModal(true);
+                }}
+                disabled={s.storeLat == null || s.storeLng == null}
+              >
+                <Plus size={14} /> Nova zona
+              </Button>
+            </div>
+            {data.deliveryZones.length > 0 && s.storeLat != null && s.storeLng != null && (
+              <div className="mb-4">
+                <button
+                  type="button"
+                  onClick={() => setShowZonesMap((v) => !v)}
+                  className="text-xs font-semibold text-brand-600 hover:underline dark:text-brand-400"
+                >
+                  {showZonesMap ? "Esconder mapa de todas as zonas" : "🗺️ Ver todas as zonas sobrepostas no mapa"}
+                </button>
+                {showZonesMap && (
+                  <div className="mt-2">
+                    <ZonesOverviewMap storeLat={s.storeLat} storeLng={s.storeLng} zones={data.deliveryZones} />
+                  </div>
+                )}
+              </div>
+            )}
+            {s.storeLat == null && (
+              <p className="mb-3 text-xs text-amber-500">
+                Marque a localização da loja acima antes de desenhar uma zona.
+              </p>
+            )}
+            <div className="divide-y divide-surface-100 dark:divide-surface-800">
+              {data.deliveryZones.map((z, zi) => (
+                <div key={z.id} className="flex items-center gap-3 py-2.5 text-sm">
+                  <span className="inline-block h-3 w-3 shrink-0 rounded-sm" style={{ background: ZONE_COLORS[zi % ZONE_COLORS.length] }} />
+                  <span className="flex-1 font-medium">{z.name}</span>
+                  <span className="text-surface-500">{brl(z.feeCents)}</span>
+                  <span className="text-xs text-surface-400">{z.etaMinutes} min</span>
+                  <button
+                    onClick={() => {
+                      setEditingZoneId(z.id);
+                      setZoneForm({
+                        name: z.name,
+                        fee: (z.feeCents / 100).toFixed(2).replace(".", ","),
+                        eta: String(z.etaMinutes),
+                        points: z.polygon,
+                      });
+                      setZoneModal(true);
+                    }}
+                    className="rounded-lg p-1 text-surface-400 hover:text-brand-600"
+                    title="Editar zona"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm(`Apagar a zona "${z.name}"?`)) return;
+                      await api.delete(`/settings/delivery-zones/${z.id}`);
+                      load();
+                    }}
+                    className="rounded-lg p-1 text-surface-300 hover:text-red-500"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+              {data.deliveryZones.length === 0 && (
+                <p className="py-4 text-center text-sm text-surface-400">
+                  Nenhuma zona desenhada — todo endereço usa as faixas por distância acima.
                 </p>
               )}
             </div>
@@ -983,6 +1272,99 @@ export function SettingsPage() {
               Cancelar
             </Button>
             <Button type="submit">Adicionar</Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={zoneModal} onClose={() => setZoneModal(false)} title={editingZoneId ? "Editar zona de entrega" : "Nova zona de entrega"} wide>
+        <form
+          onSubmit={async (e: FormEvent) => {
+            e.preventDefault();
+            if (zoneForm.points.length < 3) return;
+            const body = {
+              name: zoneForm.name,
+              polygon: zoneForm.points,
+              feeCents: parseBrl(zoneForm.fee),
+              etaMinutes: parseInt(zoneForm.eta) || 45,
+            };
+            if (editingZoneId) await api.put(`/settings/delivery-zones/${editingZoneId}`, body);
+            else await api.post("/settings/delivery-zones", body);
+            setEditingZoneId(null);
+            setZoneModal(false);
+            setZoneForm({ name: "", fee: "", eta: "45", points: [] });
+            load();
+          }}
+          className="space-y-4"
+        >
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Field label="Nome da zona *">
+              <Input
+                value={zoneForm.name}
+                onChange={(e) => setZoneForm({ ...zoneForm, name: e.target.value })}
+                placeholder="Região Norte"
+                required
+                autoFocus
+              />
+            </Field>
+            <Field label="Taxa (R$) *">
+              <Input
+                value={zoneForm.fee}
+                onChange={(e) => setZoneForm({ ...zoneForm, fee: e.target.value })}
+                placeholder="0,00 (grátis)"
+                required
+              />
+            </Field>
+            <Field label="Tempo estimado (min)">
+              <Input
+                type="number"
+                value={zoneForm.eta}
+                onChange={(e) => setZoneForm({ ...zoneForm, eta: e.target.value })}
+              />
+            </Field>
+          </div>
+          <div>
+            <p className="mb-2 text-xs text-surface-500">
+              Clique no mapa pra marcar os cantos da área (mínimo 3 pontos). Arraste um ponto pra
+              ajustar, clique com o botão direito nele pra remover.
+            </p>
+            {s.storeLat != null && s.storeLng != null && (
+              <ZonePolygonMap
+                storeLat={s.storeLat}
+                storeLng={s.storeLng}
+                points={zoneForm.points}
+                onChange={(points) => setZoneForm({ ...zoneForm, points })}
+                otherZones={data.deliveryZones.filter((z) => z.id !== editingZoneId)}
+              />
+            )}
+            <div className="mt-2 flex items-center justify-between">
+              <span className="text-xs text-surface-400">{zoneForm.points.length} ponto(s) marcado(s)</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setZoneForm({ ...zoneForm, points: zoneForm.points.slice(0, -1) })}
+                  disabled={zoneForm.points.length === 0}
+                  className="text-xs font-medium text-brand-600 hover:underline disabled:opacity-40 dark:text-brand-400"
+                >
+                  Desfazer último ponto
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoneForm({ ...zoneForm, points: [] })}
+                  disabled={zoneForm.points.length === 0}
+                  className="text-xs font-medium text-red-500 hover:underline disabled:opacity-40"
+                >
+                  Limpar
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="secondary" onClick={() => setZoneModal(false)}>
+              Cancelar
+            </Button>
+            <Button type="submit" disabled={zoneForm.points.length < 3 || !zoneForm.name.trim()}>
+              Salvar zona
+            </Button>
           </div>
         </form>
       </Modal>

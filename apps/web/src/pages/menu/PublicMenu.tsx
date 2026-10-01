@@ -14,11 +14,18 @@ import {
   ShoppingBag,
   Star,
   Trash2,
+  User,
   X,
 } from "lucide-react";
 import { initMercadoPago, Payment } from "@mercadopago/sdk-react";
 import { api } from "../../lib/api";
 import { brl, formatCep, formatPhoneBR } from "../../lib/format";
+import { setupPixels, trackPurchase } from "../../lib/pixels";
+import { useCustomerAuth, type CustomerAddress } from "../../stores/customerAuth";
+import { AccountSheet } from "./AccountSheet";
+import { OrderHistorySheet } from "./OrderHistorySheet";
+import { AddressesSheet } from "./AddressesSheet";
+import { LocationPickerMap } from "../../components/LocationPickerMap";
 import type { Product } from "../../types";
 
 // ---------- Tipos do cardápio público ----------
@@ -43,6 +50,8 @@ interface MenuTenant {
   prepMinutes: number;
   isOpen: boolean;
   closedMessage?: string | null;
+  metaPixelId?: string | null;
+  customHeadScript?: string | null;
 }
 
 /** Com lat/lng, aponta o pino exato; só cai pro texto (menos preciso — o Google recalcula sozinho) quando não há coordenada salva. */
@@ -122,6 +131,10 @@ function cartStorageKey(slug: string | undefined) {
 
 export function PublicMenuPage() {
   const { slug } = useParams<{ slug: string }>();
+  const { customer } = useCustomerAuth();
+  const [accountSheetOpen, setAccountSheetOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [addressesOpen, setAddressesOpen] = useState(false);
   const [menu, setMenu] = useState<MenuData | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [search, setSearch] = useState("");
@@ -148,6 +161,9 @@ export function PublicMenuPage() {
     type?: "DELIVERY" | "PICKUP" | "DINE_IN";
   } | null>(null);
   const [paying, setPaying] = useState<PayingState | null>(null);
+  // Nome/telefone digitados no checkout — usados só pra pré-preencher o convite
+  // pra criar conta na tela de confirmação, sem precisar guardar no back-end.
+  const lastCustomerInfo = useRef<{ name: string; phone: string } | null>(null);
 
   // Cache curto do carrinho — sobrevive a um F5, some quando a aba é fechada.
   useEffect(() => {
@@ -173,6 +189,7 @@ export function PublicMenuPage() {
         if (data.tenant.mpPublicKey) {
           initMercadoPago(data.tenant.mpPublicKey, { locale: "pt-BR" });
         }
+        setupPixels(data.tenant);
       })
       .catch(() => setNotFound(true));
   }, [slug]);
@@ -200,6 +217,7 @@ export function PublicMenuPage() {
       .then((o) => {
         if (o.paymentStatus === "PAID") {
           setPlacedOrder({ orderId: o.id, number: o.number, totalCents: o.totalCents, paid: true });
+          trackPurchase({ totalCents: o.totalCents, orderId: o.id, orderNumber: o.number });
         } else {
           setPaying({ orderId: o.id, number: o.number, totalCents: o.totalCents, method: "CARD" });
         }
@@ -369,6 +387,21 @@ export function PublicMenuPage() {
         >
           Fazer novo pedido
         </button>
+        {!customer && (
+          <button
+            onClick={() => setAccountSheetOpen(true)}
+            className="max-w-sm rounded-2xl border border-dashed border-brand-300 bg-brand-500/5 px-4 py-3 text-sm font-medium text-brand-700 dark:border-brand-700 dark:text-brand-400"
+          >
+            Crie uma conta pra acompanhar seus pedidos e pontos sem precisar guardar o link
+          </button>
+        )}
+        {accountSheetOpen && (
+          <AccountSheet
+            onClose={() => setAccountSheetOpen(false)}
+            prefillName={lastCustomerInfo.current?.name}
+            prefillPhone={lastCustomerInfo.current?.phone}
+          />
+        )}
       </div>
     );
   }
@@ -384,6 +417,12 @@ export function PublicMenuPage() {
       </div>
       <div className="mx-auto max-w-lg px-4 lg:max-w-4xl">
         <div className="relative -mt-10 mb-4 rounded-2xl border border-surface-200 bg-white p-4 shadow-lg dark:border-surface-800 dark:bg-surface-900">
+          <button
+            onClick={() => (customer ? setHistoryOpen(true) : setAccountSheetOpen(true))}
+            className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-surface-100 px-2.5 py-1 text-[11px] font-semibold text-surface-600 dark:bg-surface-800 dark:text-surface-300"
+          >
+            <User size={11} /> {customer ? `Olá, ${customer.name.split(" ")[0]}` : "Entrar"}
+          </button>
           <div className="flex items-center gap-3">
             <span className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-brand-500 text-2xl shadow-md">
               {tenant.logoUrl ? <img src={tenant.logoUrl} alt="" className="h-full w-full object-cover" /> : "🍔"}
@@ -420,6 +459,27 @@ export function PublicMenuPage() {
           )}
         </div>
 
+        {/* Login antes de pedir — pro cliente que já comprou entrar antes de montar o pedido */}
+        {!customer && (
+          <button
+            onClick={() => setAccountSheetOpen(true)}
+            className="mb-4 flex w-full items-center justify-between gap-3 rounded-2xl border border-brand-300 bg-brand-500/5 px-4 py-3 text-left dark:border-brand-700 dark:bg-brand-500/10"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-brand-600 dark:text-brand-400">
+                <User size={16} />
+              </span>
+              <div>
+                <p className="text-sm font-semibold">Já é nosso cliente?</p>
+                <p className="text-xs text-surface-500">Entre pra usar seus pontos e ver seus pedidos de novo</p>
+              </div>
+            </div>
+            <span className="shrink-0 rounded-xl bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white">
+              Entrar
+            </span>
+          </button>
+        )}
+
         {/* Busca */}
         <div className="relative mb-3">
           <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400" />
@@ -443,13 +503,13 @@ export function PublicMenuPage() {
                   key={p.id}
                   onClick={() => openProduct(p)}
                   disabled={!tenant.isOpen}
-                  className={`relative w-36 shrink-0 snap-start overflow-hidden rounded-2xl border bg-white text-left shadow-sm transition-all active:scale-[0.98] disabled:opacity-60 dark:bg-surface-900 ${
+                  className={`relative w-44 shrink-0 snap-start overflow-hidden rounded-2xl border bg-white text-left shadow-md transition-all active:scale-[0.98] disabled:opacity-60 dark:bg-surface-900 ${
                     p.favorite
                       ? "border-amber-400 ring-1 ring-amber-400/50"
-                      : "border-surface-200 dark:border-surface-800"
+                      : "border-brand-200 dark:border-brand-900"
                   }`}
                 >
-                  <div className="relative h-24 w-full bg-surface-100 dark:bg-surface-800">
+                  <div className="relative h-28 w-full bg-surface-100 dark:bg-surface-800">
                     {p.imageUrl ? (
                       <img src={p.imageUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
                     ) : (
@@ -463,11 +523,16 @@ export function PublicMenuPage() {
                       </span>
                     )}
                   </div>
-                  <div className="p-2.5">
-                    <p className="line-clamp-1 text-xs font-semibold">{p.name}</p>
-                    <p className="mt-1 text-sm font-bold text-brand-600 dark:text-brand-400">
-                      {brl(p.promoPriceCents ?? p.priceCents)}
-                    </p>
+                  <div className="p-3">
+                    <p className="line-clamp-2 text-sm font-semibold leading-snug">{p.name}</p>
+                    <div className="mt-1.5 flex flex-wrap items-baseline gap-1.5">
+                      <span className="text-base font-bold text-brand-600 dark:text-brand-400">
+                        {brl(p.promoPriceCents ?? p.priceCents)}
+                      </span>
+                      {p.promoPriceCents && (
+                        <span className="text-xs text-surface-400 line-through">{brl(p.priceCents)}</span>
+                      )}
+                    </div>
                   </div>
                 </button>
               ))}
@@ -616,7 +681,9 @@ export function PublicMenuPage() {
           onSuccess={(o) => {
             setCheckoutOpen(false);
             setCart([]);
+            lastCustomerInfo.current = { name: o.customerName ?? "", phone: o.customerPhone ?? "" };
             setPlacedOrder(o);
+            trackPurchase({ totalCents: o.totalCents, orderId: o.orderId, orderNumber: o.number });
           }}
           onPixPayment={(p) => {
             setCheckoutOpen(false);
@@ -624,6 +691,18 @@ export function PublicMenuPage() {
           }}
         />
       )}
+      {accountSheetOpen && <AccountSheet onClose={() => setAccountSheetOpen(false)} />}
+      {historyOpen && (
+        <OrderHistorySheet
+          slug={tenant.slug}
+          onClose={() => setHistoryOpen(false)}
+          onOpenAddresses={() => {
+            setHistoryOpen(false);
+            setAddressesOpen(true);
+          }}
+        />
+      )}
+      {addressesOpen && <AddressesSheet slug={tenant.slug} onClose={() => setAddressesOpen(false)} />}
       {paying && (
         <PaymentSheet
           slug={tenant.slug}
@@ -640,6 +719,7 @@ export function PublicMenuPage() {
               earnedCashbackCents: paying.earnedCashbackCents,
               type: paying.type,
             });
+            trackPurchase({ totalCents: paying.totalCents, orderId: paying.orderId, orderNumber: paying.number ?? 0 });
           }}
           onClose={() => setPaying(null)}
         />
@@ -650,7 +730,7 @@ export function PublicMenuPage() {
 
 // ---------- Bottom sheet base ----------
 
-function Sheet({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
+export function Sheet({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 backdrop-blur-sm sm:items-center" onClick={onClose}>
       <div
@@ -1014,15 +1094,19 @@ function CheckoutSheet({
     earnedPoints?: number;
     earnedCashbackCents?: number;
     type?: "DELIVERY" | "PICKUP" | "DINE_IN";
+    customerName?: string;
+    customerPhone?: string;
   }) => void;
   onPixPayment: (p: PayingState) => void;
 }) {
   const { tenant } = menu;
+  const { customer } = useCustomerAuth();
   const [type, setType] = useState<"DELIVERY" | "PICKUP" | "DINE_IN">(
     table ? "DINE_IN" : tenant.acceptsDelivery ? "DELIVERY" : "PICKUP",
   );
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  const [name, setName] = useState(customer?.name ?? "");
+  const [phone, setPhone] = useState(customer?.phone ?? "");
+  const [phoneConfirm, setPhoneConfirm] = useState(customer?.phone ?? "");
   const [street, setStreet] = useState("");
   const [number, setNumber] = useState("");
   const [neighborhood, setNeighborhood] = useState("");
@@ -1041,6 +1125,11 @@ function CheckoutSheet({
   const [useCashback, setUseCashback] = useState(false);
 
   useEffect(() => {
+    // Logado, já sabemos o saldo pelo perfil — não precisa buscar por telefone.
+    if (customer) {
+      setLoyaltyBalance({ active: true, cashbackCents: customer.cashbackCents });
+      return;
+    }
     if (phone.length < 10) {
       setLoyaltyBalance(null);
       return;
@@ -1052,7 +1141,7 @@ function CheckoutSheet({
         .catch(() => setLoyaltyBalance(null));
     }, 500);
     return () => clearTimeout(timer);
-  }, [phone, tenant.slug]);
+  }, [phone, tenant.slug, customer]);
 
   // ---- Frete calculado automaticamente pela distância (o cliente não escolhe)
   const [deliveryQuote, setDeliveryQuote] = useState<DeliveryQuote | null>(null);
@@ -1060,7 +1149,47 @@ function CheckoutSheet({
   const [quoteError, setQuoteError] = useState("");
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [locating, setLocating] = useState(false);
+  // Pino no mapa: obrigatório na entrega. `coords` só é preenchido quando o
+  // cliente CONFIRMA o pino (ou vem de um endereço salvo já confirmado antes).
+  const [showPicker, setShowPicker] = useState(false);
+  const [draftPin, setDraftPin] = useState<{ lat: number; lng: number }>({
+    lat: tenant.storeLat ?? -10.1689,
+    lng: tenant.storeLng ?? -48.3317,
+  });
+  // O mapa abre centrado na LOJA por padrão (só pra ter um ponto de partida visível) — sem essa
+  // trava, um cliente que confirma sem arrastar o pino vira um pedido "entregue" na própria loja,
+  // com frete grátis por distância zero (já aconteceu de verdade, pedido real). Só libera o botão
+  // de confirmar depois que o cliente de fato tocou/arrastou no mapa ou usou a localização do GPS.
+  const [pinMoved, setPinMoved] = useState(false);
   const quoteSeq = useRef(0);
+
+  // ---- Endereço salvo do cliente logado — evita digitar/confirmar de novo
+  const [savedAddressId, setSavedAddressId] = useState<string | null>(null);
+  function selectSavedAddress(a: CustomerAddress) {
+    setSavedAddressId(a.id);
+    setStreet(a.street);
+    setNumber(a.number);
+    setNeighborhood(a.neighborhood);
+    setCity(a.city);
+    setComplement(a.complement ?? "");
+    setCoords(a.lat != null && a.lng != null ? { lat: a.lat, lng: a.lng } : null);
+  }
+  function useOtherAddress() {
+    setSavedAddressId(null);
+    setStreet("");
+    setNumber("");
+    setNeighborhood("");
+    setCity("");
+    setComplement("");
+    setCoords(null);
+  }
+  useEffect(() => {
+    const addresses = customer?.addresses;
+    if (!addresses || addresses.length === 0) return;
+    const def = addresses.find((a) => a.isDefault) ?? addresses[0];
+    selectSavedAddress(def);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customer?.id]);
 
   // ---- Busca automática de endereço pelo CEP — só falta o número/lote
   const [cep, setCep] = useState("");
@@ -1083,7 +1212,6 @@ function CheckoutSheet({
       setStreet(found.logradouro ?? "");
       setNeighborhood(found.bairro ?? "");
       setCity(found.localidade ?? "");
-      setCoords(null);
       numberInputRef.current?.focus();
     } catch {
       setCepError("Não foi possível buscar esse CEP agora. Digite o endereço manualmente.");
@@ -1101,21 +1229,38 @@ function CheckoutSheet({
     setQuoteError("");
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        // Abre o mapa já no ponto do GPS pro cliente conferir/ajustar e confirmar.
+        setDraftPin({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setPinMoved(true);
+        setShowPicker(true);
         setLocating(false);
       },
       () => {
         setLocating(false);
-        setQuoteError("Não conseguimos acessar sua localização. Digite o endereço manualmente.");
+        setQuoteError("Não conseguimos acessar sua localização. Toque em \"Marcar no mapa\" e ajuste o pino.");
       },
       { enableHighAccuracy: true, timeout: 10_000 },
     );
   }
 
-  const hasAddressText = street.trim() && number.trim() && neighborhood.trim() && city.trim();
+  function openPicker() {
+    if (coords) {
+      setDraftPin(coords);
+      setPinMoved(true); // reabrindo um pino já confirmado antes — não é "sem mexer"
+    } else {
+      setPinMoved(false);
+    }
+    setShowPicker(true);
+  }
+  function confirmPin() {
+    if (!pinMoved) return;
+    setCoords(draftPin);
+    setShowPicker(false);
+    setQuoteError("");
+  }
 
   useEffect(() => {
-    if (type !== "DELIVERY" || (!coords && !hasAddressText)) {
+    if (type !== "DELIVERY" || !coords) {
       setDeliveryQuote(null);
       setQuoteError("");
       setQuoting(false);
@@ -1154,7 +1299,7 @@ function CheckoutSheet({
     );
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, street, number, neighborhood, city, coords, tenant.slug, subtotal]);
+  }, [type, coords, tenant.slug, subtotal]);
 
   let deliveryFee = type === "DELIVERY" ? (deliveryQuote?.feeCents ?? 0) : 0;
   if (couponApplied?.type === "FREE_SHIPPING") deliveryFee = 0;
@@ -1189,9 +1334,13 @@ function CheckoutSheet({
       setError("Informe seu nome e um telefone válido.");
       return;
     }
+    if (phone !== phoneConfirm) {
+      setError("Os dois números de WhatsApp precisam ser iguais — confira e digite de novo.");
+      return;
+    }
     if (type === "DELIVERY") {
-      if (!street.trim() || !number.trim() || !neighborhood.trim() || !city.trim()) {
-        setError("Preencha o endereço de entrega.");
+      if (!coords) {
+        setError("Marque sua localização no mapa — é o que o entregador usa pra chegar até você.");
         return;
       }
       if (quoting) {
@@ -1281,7 +1430,7 @@ function CheckoutSheet({
         });
         return;
       }
-      onSuccess({ ...order, type });
+      onSuccess({ ...order, type, customerName: name, customerPhone: phone });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao enviar pedido");
     } finally {
@@ -1367,20 +1516,105 @@ function CheckoutSheet({
           value={formatPhoneBR(phone)}
           onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 11))}
         />
+        <input
+          className={`${inputClass} ${phoneConfirm.length >= 10 && phone !== phoneConfirm ? "border-red-400" : ""}`}
+          placeholder="Confirme seu WhatsApp (digite de novo) *"
+          inputMode="tel"
+          value={formatPhoneBR(phoneConfirm)}
+          onChange={(e) => setPhoneConfirm(e.target.value.replace(/\D/g, "").slice(0, 11))}
+          onPaste={(e) => e.preventDefault()}
+        />
+        {phoneConfirm.length >= 10 && phone !== phoneConfirm && (
+          <p className="text-xs text-red-500">Os números não conferem.</p>
+        )}
       </div>
 
       {type === "DELIVERY" && (
         <div className="mb-4 space-y-3">
-          <button
-            type="button"
-            onClick={useMyLocation}
-            disabled={locating}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-brand-300 bg-brand-500/5 py-2.5 text-sm font-medium text-brand-600 transition-colors hover:bg-brand-500/10 disabled:opacity-60 dark:border-brand-700 dark:text-brand-400"
-          >
-            <Crosshair size={15} />
-            {locating ? "Localizando..." : "Usar minha localização atual"}
-          </button>
-          <p className="text-center text-xs text-surface-400">ou informe seu CEP</p>
+          {customer?.addresses && customer.addresses.length > 0 && (
+            <div className="space-y-2">
+              {customer.addresses.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={() => selectSavedAddress(a)}
+                  className={`w-full rounded-xl border px-3 py-2.5 text-left text-sm transition-colors ${
+                    savedAddressId === a.id
+                      ? "border-brand-500 bg-brand-500/5"
+                      : "border-surface-200 dark:border-surface-700"
+                  }`}
+                >
+                  <span className="font-semibold">{a.label}</span>
+                  <span className="block text-xs text-surface-400">
+                    {a.street}, {a.number} — {a.neighborhood}
+                  </span>
+                </button>
+              ))}
+              {savedAddressId && (
+                <button type="button" onClick={useOtherAddress} className="text-xs font-medium text-surface-400 underline">
+                  Entregar em outro endereço
+                </button>
+              )}
+            </div>
+          )}
+          {(!customer?.addresses?.length || !savedAddressId) && (
+            <>
+          <p className="text-xs font-medium text-surface-500">
+            📍 Marque no mapa onde você quer receber — é o que o entregador usa pra chegar certinho.
+          </p>
+          {!coords && !showPicker && (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={useMyLocation}
+                disabled={locating}
+                className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-brand-300 bg-brand-500/5 py-2.5 text-sm font-medium text-brand-600 transition-colors hover:bg-brand-500/10 disabled:opacity-60 dark:border-brand-700 dark:text-brand-400"
+              >
+                <Crosshair size={15} />
+                {locating ? "Localizando..." : "Usar minha localização"}
+              </button>
+              <button
+                type="button"
+                onClick={openPicker}
+                className="flex items-center justify-center gap-2 rounded-xl border border-brand-500 bg-brand-500 py-2.5 text-sm font-semibold text-white"
+              >
+                <MapPinned size={15} /> Marcar no mapa
+              </button>
+            </div>
+          )}
+          {showPicker && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-amber-600 dark:text-amber-400">
+                👆 {pinMoved ? "Pino ajustado — confira se está certinho." : "Toque no mapa ou arraste o pino até a sua porta antes de confirmar."}
+              </p>
+              <LocationPickerMap
+                lat={draftPin.lat}
+                lng={draftPin.lng}
+                onChange={(lat, lng) => {
+                  setDraftPin({ lat, lng });
+                  setPinMoved(true);
+                }}
+                className="h-64 w-full rounded-xl"
+              />
+              <button
+                type="button"
+                onClick={confirmPin}
+                disabled={!pinMoved}
+                className="w-full rounded-xl bg-brand-500 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {pinMoved ? "Confirmar localização" : "Marque seu endereço no mapa primeiro"}
+              </button>
+            </div>
+          )}
+          {coords && !showPicker && (
+            <div className="flex items-center justify-between rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+              <span>✓ Localização confirmada no mapa</span>
+              <button type="button" onClick={openPicker} className="underline">
+                Alterar
+              </button>
+            </div>
+          )}
+          <p className="text-center text-xs text-surface-400">Complemente com o endereço (opcional):</p>
           <div className="flex items-center gap-2">
             <input
               className={inputClass}
@@ -1398,7 +1632,7 @@ function CheckoutSheet({
           </div>
           {cepError && <p className="text-xs text-red-500">{cepError}</p>}
           <p className="text-center text-xs text-surface-400">
-            ou preencha o endereço manualmente
+            Número, complemento e ponto de referência ajudam o entregador
           </p>
           <div className="grid grid-cols-3 gap-3">
             <input
@@ -1407,7 +1641,6 @@ function CheckoutSheet({
               value={street}
               onChange={(e) => {
                 setStreet(e.target.value);
-                setCoords(null);
               }}
             />
             <input
@@ -1425,7 +1658,6 @@ function CheckoutSheet({
               value={neighborhood}
               onChange={(e) => {
                 setNeighborhood(e.target.value);
-                setCoords(null);
               }}
             />
             <input
@@ -1434,7 +1666,6 @@ function CheckoutSheet({
               value={city}
               onChange={(e) => {
                 setCity(e.target.value);
-                setCoords(null);
               }}
             />
           </div>
@@ -1444,6 +1675,8 @@ function CheckoutSheet({
             value={complement}
             onChange={(e) => setComplement(e.target.value)}
           />
+            </>
+          )}
 
           {/* Status do frete — calculado automaticamente, o cliente não escolhe */}
           {quoting && (

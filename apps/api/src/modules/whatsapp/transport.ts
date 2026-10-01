@@ -1,6 +1,7 @@
 import { env } from "../../config/env.js";
 import { AppError } from "../../middlewares/error.js";
 import { prisma } from "../../lib/prisma.js";
+import { normalizeBrazilPhone } from "./phone.js";
 
 /**
  * Transporte de WhatsApp da plataforma.
@@ -22,6 +23,25 @@ export interface ConnectionInfo {
 
 export function instanceNameFor(tenantId: string) {
   return `bh_${tenantId}`;
+}
+
+/** Campos crus de uma imagem recebida no webhook (formato Baileys/Evolution) — usados pra baixar o arquivo depois. */
+export interface WaRawImageMessage {
+  url?: string;
+  mediaKey?: string;
+  mimetype?: string;
+  fileSha256?: string;
+  fileEncSha256?: string;
+  fileLength?: string;
+  directPath?: string;
+  caption?: string;
+  /** ID da mensagem no WhatsApp — o endpoint documentado da Evolution baixa a mídia por ele. */
+  messageId?: string;
+}
+
+export interface WaLabel {
+  id: string;
+  name: string;
 }
 
 const UNAVAILABLE = new AppError(
@@ -61,6 +81,25 @@ const mock = {
   },
   async sendText(instance: string, phone: string, text: string) {
     console.log(`📱 [WA demo] ${instance} → ${phone}:\n${text}\n`);
+  },
+  async sendLocation(instance: string, phone: string, place: { name: string; address: string; lat: number; lng: number }) {
+    console.log(`📍 [WA demo] ${instance} → ${phone}: ${place.name} (${place.lat},${place.lng})`);
+  },
+  async sendImage(instance: string, phone: string, imageUrl: string, caption: string) {
+    console.log(`🖼️ [WA demo] ${instance} → ${phone}: ${imageUrl}\n${caption}\n`);
+  },
+  async downloadImage(_instance: string, _media: WaRawImageMessage): Promise<string | null> {
+    return null; // modo demo nunca recebe mídia real do WhatsApp
+  },
+  async downloadAudio(_instance: string, _messageId: string): Promise<string | null> {
+    return null;
+  },
+  async listLabels(_instance: string): Promise<WaLabel[]> {
+    return ["Perguntando", "Montando pedido", "Pediu", "Sumiu", "Fora da área"].map((name, i) => ({ id: String(i + 1), name }));
+  },
+  async setLabel(instance: string, phone: string, labelId: string, action: "add" | "remove", _onDetail?: (detail: string) => void): Promise<boolean> {
+    console.log(`🏷️ [WA demo] ${instance} → ${phone}: ${action} etiqueta ${labelId}`);
+    return true;
   },
 };
 
@@ -133,8 +172,127 @@ const real = {
   async sendText(instance: string, phone: string, text: string) {
     await evoFetch(`/message/sendText/${instance}`, {
       method: "POST",
-      body: JSON.stringify({ number: phone.replace(/\D/g, ""), text }),
+      body: JSON.stringify({ number: normalizeBrazilPhone(phone), text }),
     });
+  },
+
+  async sendLocation(instance: string, phone: string, place: { name: string; address: string; lat: number; lng: number }) {
+    await evoFetch(`/message/sendLocation/${instance}`, {
+      method: "POST",
+      body: JSON.stringify({ number: normalizeBrazilPhone(phone), name: place.name, address: place.address, latitude: place.lat, longitude: place.lng }),
+    });
+  },
+
+  async sendImage(instance: string, phone: string, imageUrl: string, caption: string) {
+    await evoFetch(`/message/sendMedia/${instance}`, {
+      method: "POST",
+      body: JSON.stringify({ number: normalizeBrazilPhone(phone), mediatype: "image", mimetype: "image/jpeg", media: imageUrl, fileName: "foto.jpg", caption }),
+    });
+  },
+
+  /**
+   * Baixa (em base64) a imagem de uma mensagem recebida — pra ler comprovante
+   * de Pix. Nunca lança: o endpoint da Evolution tem instabilidade conhecida
+   * (docs de terceiros citam erro 429/500 intermitente), então qualquer falha
+   * vira `null` e quem chama trata como "não consegui ler a imagem" em vez de
+   * derrubar o processamento do webhook.
+   */
+  async downloadImage(instance: string, media: WaRawImageMessage): Promise<string | null> {
+    // Caminho documentado da Evolution: baixa a mídia pelo ID da mensagem.
+    if (media.messageId) {
+      try {
+        const res = await evoFetch(`/chat/getBase64FromMediaMessage/${instance}`, {
+          method: "POST",
+          body: JSON.stringify({ message: { key: { id: media.messageId } } }),
+        });
+        const body = (await res.json().catch(() => ({}))) as { base64?: string };
+        if (body.base64) return body.base64.replace(/^data:[^;]+;base64,/, "");
+      } catch (err) {
+        console.error("Falha em getBase64FromMediaMessage, tentando endpoint alternativo:", err);
+      }
+    }
+    try {
+      const res = await evoFetch(`/message/downloadimage/${instance}`, {
+        method: "POST",
+        body: JSON.stringify(media),
+      });
+      const body = (await res.json().catch(() => ({}))) as { success?: boolean; image?: string };
+      return body.success && body.image ? body.image : null;
+    } catch (err) {
+      console.error("Falha ao baixar imagem do WhatsApp:", err);
+      return null;
+    }
+  },
+
+  /** Baixa (base64) o áudio de uma mensagem recebida, pelo ID. Nunca lança — falha vira null. */
+  async downloadAudio(instance: string, messageId: string): Promise<string | null> {
+    try {
+      const res = await evoFetch(`/chat/getBase64FromMediaMessage/${instance}`, {
+        method: "POST",
+        body: JSON.stringify({ message: { key: { id: messageId } } }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { base64?: string };
+      return body.base64 ? body.base64.replace(/^data:[^;]+;base64,/, "") : null;
+    } catch (err) {
+      console.error("Falha ao baixar áudio do WhatsApp:", err);
+      return null;
+    }
+  },
+
+  async listLabels(instance: string): Promise<WaLabel[]> {
+  try {
+    const res = await evoFetch(`/label/findLabels/${instance}`);
+    const body = (await res.json().catch(() => [])) as { id?: string | number; name?: string }[];
+    return Array.isArray(body) ? body.filter((l) => l.id != null && l.name).map((l) => ({ id: String(l.id), name: String(l.name) })) : [];
+  } catch (err) {
+    console.error("Falha ao listar etiquetas do WhatsApp:", err);
+    return [];
+  }
+  },
+  async setLabel(
+    instance: string,
+    phone: string,
+    labelId: string,
+    action: "add" | "remove",
+    onDetail?: (detail: string) => void,
+  ): Promise<boolean> {
+    // Tenta o número puro e, se o servidor recusar, o formato JID — a Evolution
+    // aceita os dois, mas em algumas versões só um funciona (bug conhecido de JID/LID).
+    const digits = normalizeBrazilPhone(phone);
+    const attempts = [digits, `${digits}@s.whatsapp.net`];
+    const errors: string[] = [];
+    for (const number of attempts) {
+      try {
+        const res = await fetch(`${env.whatsapp.serverUrl}/label/handleLabel/${instance}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", apikey: env.whatsapp.apiKey },
+          body: JSON.stringify({ number, labelId, action }),
+        });
+        const text = await res.text().catch(() => "");
+        if (res.ok) {
+          let success = true;
+          try {
+            success = (JSON.parse(text) as { success?: boolean }).success !== false;
+          } catch {
+            /* corpo não-JSON: confia no status */
+          }
+          if (success) return true;
+        }
+        // A Evolution aplica a etiqueta no WhatsApp e SÓ DEPOIS grava um registro no banco dela.
+        // Quando o banco dela não tem o índice único (erro 42P10 / ON CONFLICT), ela devolve 400
+        // mesmo com a etiqueta já aplicada. Trata esse erro específico como "enviado".
+        if (/Unable to (add|remove) label/i.test(text) && /42P10|ON CONFLICT|no unique or exclusion constraint/i.test(text)) {
+          onDetail?.("SOFT: o WhatsApp recebeu o comando; a Evolution só falhou ao gravar o registro interno dela.");
+          return true;
+        }
+        errors.push(`HTTP ${res.status} (${number.includes("@") ? "jid" : "número"}): ${text.slice(0, 250)}`);
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : "erro de rede");
+      }
+    }
+    console.error("Falha ao aplicar etiqueta no WhatsApp:", errors.join(" | "));
+    onDetail?.(errors.join(" | "));
+    return false;
   },
 };
 

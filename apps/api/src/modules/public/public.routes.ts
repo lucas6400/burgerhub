@@ -4,7 +4,9 @@ import { prisma } from "../../lib/prisma.js";
 import { h } from "../../lib/http.js";
 import { AppError } from "../../middlewares/error.js";
 import { rateLimit } from "../../middlewares/rateLimit.js";
+import { isStoreOpenNow } from "../../utils/storeTime.js";
 import { createOrder, quoteDelivery, validateCoupon } from "../orders/orders.service.js";
+import { optionalCustomerAuth } from "../customer-auth/customer-auth.middleware.js";
 import { reverseGeocode } from "../orders/geocoding.js";
 import {
   createDeliveryMessage,
@@ -35,12 +37,7 @@ async function tenantBySlug(slug: string) {
 }
 
 function isOpenNow(tenant: Awaited<ReturnType<typeof tenantBySlug>>) {
-  if (tenant.settings?.isOpenOverride != null) return tenant.settings.isOpenOverride;
-  const now = new Date();
-  const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  return tenant.businessHours.some(
-    (h) => h.weekday === now.getDay() && !h.closed && h.openTime <= hhmm && hhmm <= h.closeTime,
-  );
+  return isStoreOpenNow({ isOpenOverride: tenant.settings?.isOpenOverride, businessHours: tenant.businessHours });
 }
 
 /** Cardápio completo do estabelecimento. */
@@ -108,6 +105,8 @@ publicRoutes.get(
         isOpen: isOpenNow(tenant),
         closedMessage: tenant.settings?.closedMessage,
         businessHours: tenant.businessHours,
+        metaPixelId: tenant.settings?.metaPixelId ?? null,
+        customHeadScript: tenant.settings?.customHeadScript ?? null,
       },
       categories,
       combos,
@@ -228,6 +227,7 @@ publicRoutes.get(
 publicRoutes.post(
   "/:slug/orders",
   rateLimit(15, 60_000),
+  optionalCustomerAuth,
   h(async (req, res) => {
     const tenant = await tenantBySlug(req.params.slug);
     if (!isOpenNow(tenant)) {
@@ -253,10 +253,13 @@ publicRoutes.post(
       address: z
         .object({
           label: z.string().optional(),
-          street: z.string().min(1),
-          number: z.string().min(1),
-          neighborhood: z.string().min(1),
-          city: z.string().min(1),
+          // Texto do endereço virou complemento: o pino no mapa (lat/lng) é o que
+          // vale e é obrigatório na entrega (checado abaixo) — endereço por quadra
+          // (Palmas etc.) não é reconhecido pelo geocodificador.
+          street: z.string().default(""),
+          number: z.string().default(""),
+          neighborhood: z.string().default(""),
+          city: z.string().default(""),
           complement: z.string().optional(),
           reference: z.string().optional(),
           lat: z.number().optional(),
@@ -282,6 +285,9 @@ publicRoutes.post(
     if (data.type === "DELIVERY" && !data.address) {
       throw new AppError(400, "Endereço obrigatório para entrega");
     }
+    if (data.type === "DELIVERY" && (data.address?.lat == null || data.address?.lng == null)) {
+      throw new AppError(400, "Marque sua localização no mapa para a entrega — é o que o entregador usa pra chegar até você.");
+    }
 
     // tableId nunca vem do cliente — resolvido aqui pelo número + tenant, evita
     // que um cliente aponte pra mesa de outro estabelecimento.
@@ -298,7 +304,17 @@ publicRoutes.post(
     }
 
     const { tableNumber: _tableNumber, ...orderInput } = data;
-    const order = await createOrder({ ...orderInput, tenantId: tenant.id, source: tableId ? "TABLE" : "MENU", tableId });
+    // customerId nunca vem do corpo da requisição — só do token verificado, pra
+    // ninguém conseguir grudar um pedido na conta de outro cliente.
+    const customerId =
+      req.customerAuth && req.customerAuth.tenantId === tenant.id ? req.customerAuth.customerId : undefined;
+    const order = await createOrder({
+      ...orderInput,
+      tenantId: tenant.id,
+      source: tableId ? "TABLE" : "MENU",
+      tableId,
+      customerId,
+    });
     res.status(201).json({
       orderId: order.id,
       number: order.number,
@@ -407,7 +423,26 @@ publicRoutes.get(
     const tenant = await tenantBySlug(req.params.slug);
     const order = await prisma.order.findFirst({
       where: { id: req.params.orderId, tenantId: tenant.id },
-      select: { number: true, totalCents: true, type: true, status: true },
+      select: {
+        number: true,
+        totalCents: true,
+        type: true,
+        status: true,
+        subtotalCents: true,
+        discountCents: true,
+        deliveryFeeCents: true,
+        paymentMethod: true,
+        cancelReason: true,
+        items: {
+          select: {
+            nameSnapshot: true,
+            quantity: true,
+            unitPriceCents: true,
+            addons: { select: { nameSnapshot: true, quantity: true, unitPriceCents: true } },
+            removals: { select: { nameSnapshot: true } },
+          },
+        },
+      },
     });
     if (!order) throw new AppError(404, "Pedido não encontrado");
     const tracking = await getDeliveryTracking(tenant.id, req.params.orderId);

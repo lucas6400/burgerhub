@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma.js";
 import { h } from "../../lib/http.js";
 import { requireAuth, requireRole, tenantOf } from "../../middlewares/auth.js";
 import { AppError } from "../../middlewares/error.js";
+import { startOfMonthInStoreTimezone } from "../../utils/storeTime.js";
 
 export const financeRoutes = Router();
 financeRoutes.use(requireAuth, requireRole("CASHIER"));
@@ -45,9 +46,7 @@ financeRoutes.get(
   "/summary",
   h(async (req, res) => {
     const tenantId = tenantOf(req);
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
+    const monthStart = startOfMonthInStoreTimezone();
 
     const [income, expense, pendingReceivable, pendingPayable] = await Promise.all([
       prisma.financialEntry.aggregate({

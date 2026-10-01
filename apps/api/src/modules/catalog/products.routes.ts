@@ -15,6 +15,7 @@ const productSchema = z.object({
   priceCents: z.number().int().min(0),
   promoPriceCents: z.number().int().min(0).optional().nullable(),
   imageUrl: z.string().optional().nullable(),
+  whatsappImageUrl: z.string().optional().nullable(),
   categoryId: z.string(),
   available: z.boolean().optional(),
   showInKds: z.boolean().optional(),

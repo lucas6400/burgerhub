@@ -14,6 +14,8 @@ import {
 
 const PAYMENT_METHODS = ["PIX", "CASH", "CREDIT", "DEBIT", "VR", "VA", "ONLINE"] as const;
 
+import { maybeRunLateOrderSweep } from "../whatsapp/late-orders.service.js";
+
 export const ordersRoutes = Router();
 ordersRoutes.use(requireAuth);
 
@@ -28,6 +30,8 @@ ordersRoutes.get(
   h(async (req, res) => {
     const { status, active, search, from, to } = req.query as Record<string, string | undefined>;
     const tenantId = tenantOf(req);
+    // Painel aberto = ótima hora pra checar pedido atrasado (ver late-orders.service.ts).
+    if (active === "true") void maybeRunLateOrderSweep(tenantId);
 
     const orders = await prisma.order.findMany({
       where: {

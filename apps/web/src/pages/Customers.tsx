@@ -18,6 +18,8 @@ interface CustomerRow {
   computedTier: string;
   loyaltyPoints: number;
   cashbackCents: number;
+  buyXProgress: number;
+  hasAppAccess: boolean;
   addresses: { id: string; label: string; street: string; number: string; neighborhood: string }[];
 }
 
@@ -42,7 +44,9 @@ const tierColor: Record<string, "gray" | "amber" | "purple" | "blue"> = {
 const TABS = ["Todos", "Fidelidade"] as const;
 
 export function CustomersPage() {
-  const { tenant } = useAuth();
+  const { tenant, user } = useAuth();
+  const canResetAccess = user?.role === "ADMIN" || user?.role === "MANAGER";
+  const [resettingAccess, setResettingAccess] = useState(false);
   const [customers, setCustomers] = useState<CustomerRow[] | null>(null);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState<CustomerDetail | null>(null);
@@ -53,6 +57,9 @@ export function CustomersPage() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sent, setSent] = useState(false);
+  const [program, setProgram] = useState<{ type: string; buyX: number; getY: string } | null>(null);
+  const [redeeming, setRedeeming] = useState(false);
+  const [redeemError, setRedeemError] = useState("");
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -64,9 +71,46 @@ export function CustomersPage() {
     return () => clearTimeout(t);
   }, [search]);
 
+  useEffect(() => {
+    api.get<{ type: string; buyX: number; getY: string }>("/loyalty/program").then(setProgram).catch(console.error);
+  }, []);
+
+  async function redeemBuyXGetY() {
+    if (!detail) return;
+    setRedeeming(true);
+    setRedeemError("");
+    try {
+      const { buyXProgress } = await api.post<{ ok: true; buyXProgress: number }>(
+        `/customers/${detail.id}/redeem-buy-x-get-y`,
+      );
+      setDetail((prev) => (prev ? { ...prev, buyXProgress } : prev));
+      setDetailRow((prev) => (prev ? { ...prev, buyXProgress } : prev));
+      setCustomers((prev) => prev?.map((c) => (c.id === detail.id ? { ...c, buyXProgress } : c)) ?? prev);
+    } catch (err) {
+      setRedeemError(err instanceof Error ? err.message : "Erro ao resgatar recompensa");
+    } finally {
+      setRedeeming(false);
+    }
+  }
+
   async function openDetail(row: CustomerRow) {
     setDetailRow(row);
+    setRedeemError("");
     setDetail(await api.get<CustomerDetail>(`/customers/${row.id}`));
+  }
+
+  async function resetAppAccess() {
+    if (!detail) return;
+    if (!confirm(`Redefinir o acesso de ${detail.name} ao app? Ele(a) vai precisar criar a conta de novo com o mesmo telefone.`)) return;
+    setResettingAccess(true);
+    try {
+      await api.post(`/customers/${detail.id}/reset-app-access`);
+      setDetail((prev) => (prev ? { ...prev, hasAppAccess: false } : prev));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Erro ao redefinir acesso");
+    } finally {
+      setResettingAccess(false);
+    }
   }
 
   function openMessageModal(c: CustomerRow) {
@@ -74,7 +118,11 @@ export function CustomersPage() {
     const defaultText =
       c.cashbackCents > 0
         ? `Olá, ${c.name}! Você tem ${brl(c.cashbackCents)} de cashback esperando por você no ${name}. Use no seu próximo pedido pelo cardápio digital! 🎉`
-        : `Olá, ${c.name}! Você tem ${c.loyaltyPoints} pontos de fidelidade no ${name}. 🎉`;
+        : program?.type === "BUY_X_GET_Y" && c.buyXProgress > 0
+          ? c.buyXProgress >= program.buyX
+            ? `Olá, ${c.name}! Você já completou seus pedidos no ${name} e tem direito a: ${program.getY}. Aproveite! 🎉`
+            : `Olá, ${c.name}! Você já fez ${c.buyXProgress} de ${program.buyX} pedidos no ${name} — faltam só ${program.buyX - c.buyXProgress} pra ganhar: ${program.getY}. 🎉`
+          : `Olá, ${c.name}! Você tem ${c.loyaltyPoints} pontos de fidelidade no ${name}. 🎉`;
     setMessageTarget(c);
     setMessageText(defaultText);
     setSendError("");
@@ -96,8 +144,11 @@ export function CustomersPage() {
   }
 
   const loyaltyCustomers = (customers ?? [])
-    .filter((c) => c.loyaltyPoints > 0 || c.cashbackCents > 0)
-    .sort((a, b) => b.cashbackCents + b.loyaltyPoints - (a.cashbackCents + a.loyaltyPoints));
+    .filter((c) => c.loyaltyPoints > 0 || c.cashbackCents > 0 || c.buyXProgress > 0)
+    .sort(
+      (a, b) =>
+        b.cashbackCents + b.loyaltyPoints + b.buyXProgress - (a.cashbackCents + a.loyaltyPoints + a.buyXProgress),
+    );
   const visibleCustomers = tab === "Fidelidade" ? loyaltyCustomers : customers;
 
   return (
@@ -183,6 +234,12 @@ export function CustomersPage() {
                         {c.loyaltyPoints} pts
                       </p>
                     )}
+                    {c.buyXProgress > 0 && program && (
+                      <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                        {c.buyXProgress}/{program.buyX} pedidos
+                        {c.buyXProgress >= program.buyX && " 🎁"}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="hidden w-28 text-right sm:block">
@@ -239,6 +296,44 @@ export function CustomersPage() {
                 <p className="text-surface-500">🎂 {formatDate(detailRow.birthDate)}</p>
               )}
             </div>
+
+            {program?.type === "BUY_X_GET_Y" && detail && (
+              <div className="rounded-xl bg-amber-500/10 p-3">
+                <p className="text-sm font-medium">
+                  🎁 {detail.buyXProgress}/{program.buyX} pedidos — {program.getY}
+                </p>
+                {detail.buyXProgress >= program.buyX ? (
+                  canResetAccess ? (
+                    <>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="mt-2"
+                        onClick={redeemBuyXGetY}
+                        disabled={redeeming}
+                      >
+                        {redeeming ? "Resgatando..." : "Marcar recompensa como entregue"}
+                      </Button>
+                      {redeemError && <p className="mt-1 text-xs text-red-500">{redeemError}</p>}
+                    </>
+                  ) : (
+                    <p className="mt-1 text-xs text-surface-500">
+                      Já pode resgatar — peça pra um gerente confirmar a entrega.
+                    </p>
+                  )
+                ) : (
+                  <p className="mt-1 text-xs text-surface-500">
+                    Faltam {program.buyX - detail.buyXProgress} pedido(s) pra completar.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {canResetAccess && detail?.hasAppAccess && (
+              <Button type="button" variant="secondary" size="sm" onClick={resetAppAccess} disabled={resettingAccess}>
+                {resettingAccess ? "Redefinindo..." : "Redefinir acesso ao app"}
+              </Button>
+            )}
 
             {detail?.addresses && detail.addresses.length > 0 && (
               <div>

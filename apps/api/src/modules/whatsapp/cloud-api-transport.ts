@@ -11,6 +11,8 @@
  * conta/token reais nesta sessão — validar com um número de teste antes de
  * habilitar para qualquer tenant em produção.
  */
+import { normalizeBrazilPhone } from "./phone.js";
+
 const GRAPH_API_VERSION = "v21.0";
 
 export async function cloudApiSendText(phoneNumberId: string, accessToken: string, to: string, text: string) {
@@ -19,7 +21,7 @@ export async function cloudApiSendText(phoneNumberId: string, accessToken: strin
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to: to.replace(/\D/g, ""),
+      to: normalizeBrazilPhone(to),
       type: "text",
       text: { body: text },
     }),

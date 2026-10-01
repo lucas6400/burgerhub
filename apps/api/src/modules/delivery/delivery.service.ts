@@ -120,6 +120,31 @@ export async function assignDriver(params: {
 
   await assertCapacityAvailable(params.driverId);
 
+  // Recalcula a previsão com o entregador real — antes ficava presa na estimativa
+  // feita quando o pedido ficou pronto (que assumia entregador já na loja),
+  // então "quanto tempo até o entregador chegar" no cardápio nunca refletia a
+  // distância de onde ele realmente está.
+  const driver = await prisma.driver.findUnique({ where: { id: params.driverId } });
+  const driverToStoreMinutes =
+    driver?.currentLat != null && driver?.currentLng != null
+      ? etaMinutesFor(
+          distanceBetween({ lat: driver.currentLat, lng: driver.currentLng }, { lat: delivery.pickupLat, lng: delivery.pickupLng }),
+          driver.vehicleType,
+        )
+      : 0;
+  const travelMinutes =
+    delivery.destinationLat != null && delivery.destinationLng != null
+      ? etaMinutesFor(
+          distanceBetween({ lat: delivery.pickupLat, lng: delivery.pickupLng }, { lat: delivery.destinationLat, lng: delivery.destinationLng }),
+          driver?.vehicleType ?? "MOTORCYCLE",
+        )
+      : etaMinutesFor(delivery.estimatedDistanceKm ?? 0, driver?.vehicleType ?? "MOTORCYCLE");
+  const { estimatedMinutes, estimatedAt } = estimateDeliveryTime({
+    prepMinutesRemaining: 0, // só existe Delivery pra pedido já pronto
+    driverToStoreMinutes,
+    travelMinutes,
+  });
+
   const now = new Date();
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.delivery.update({
@@ -128,6 +153,8 @@ export async function assignDriver(params: {
         driverId: params.driverId,
         status: "DRIVER_ASSIGNED",
         assignedAt: now,
+        estimatedDurationMin: estimatedMinutes,
+        estimatedDeliveryAt: estimatedAt,
         events: {
           create: {
             type: "DRIVER_ASSIGNED",
@@ -180,11 +207,34 @@ export async function assignGroupedDeliveries(params: {
     deliveries.map((d) => ({ point: { lat: d.destinationLat!, lng: d.destinationLng! }, delivery: d })),
   );
 
+  const driver = await prisma.driver.findUnique({ where: { id: params.driverId } });
+  const vehicleType = driver?.vehicleType ?? "MOTORCYCLE";
+  const driverToStoreMinutes =
+    driver?.currentLat != null && driver?.currentLng != null
+      ? etaMinutesFor(distanceBetween({ lat: driver.currentLat, lng: driver.currentLng }, origin), vehicleType)
+      : 0;
+
+  // Cada parada soma o trecho até ela ao acumulado das anteriores — a 2ª parada
+  // demora mais que a 1ª porque o entregador passa por ela primeiro. Sem isso,
+  // toda parada mostrava a mesma previsão (calculada como se fosse a única).
+  let cumulativeTravelMinutes = 0;
+  let cumulativePoint = origin;
+
   const now = new Date();
   const updated = await prisma.$transaction(async (tx) => {
     const results = [];
     for (let i = 0; i < ordered.length; i++) {
-      const { delivery } = ordered[i];
+      const { delivery, point } = ordered[i];
+      const legKm = distanceBetween(cumulativePoint, point);
+      cumulativeTravelMinutes += etaMinutesFor(legKm, vehicleType);
+      cumulativePoint = point;
+
+      const { estimatedMinutes, estimatedAt } = estimateDeliveryTime({
+        prepMinutesRemaining: 0,
+        driverToStoreMinutes,
+        travelMinutes: cumulativeTravelMinutes,
+      });
+
       const result = await tx.delivery.update({
         where: { id: delivery.id },
         data: {
@@ -192,6 +242,8 @@ export async function assignGroupedDeliveries(params: {
           status: "DRIVER_ASSIGNED",
           assignedAt: now,
           stopSequence: i + 1,
+          estimatedDurationMin: estimatedMinutes,
+          estimatedDeliveryAt: estimatedAt,
           events: {
             create: {
               type: "DRIVER_ASSIGNED",
@@ -537,6 +589,8 @@ export async function getDeliveryTracking(tenantId: string, orderId: string) {
       destinationLng: null,
       estimatedDeliveryAt: null,
       otherOrdersInRoute: 0,
+      stopSequence: null,
+      stopsAheadInRoute: 0,
       canChat: false,
     };
   }
@@ -550,6 +604,19 @@ export async function getDeliveryTracking(tenantId: string, orderId: string) {
         },
       })
     : 0;
+  // Quantas paradas o entregador ainda visita ANTES da sua — mais preciso que
+  // "otherOrdersInRoute" pra dizer "faltam N entregas antes da minha".
+  const stopsAheadInRoute =
+    delivery.driverId && delivery.stopSequence != null
+      ? await prisma.delivery.count({
+          where: {
+            driverId: delivery.driverId,
+            id: { not: delivery.id },
+            status: { notIn: OPEN_DELIVERY_STATUSES },
+            stopSequence: { lt: delivery.stopSequence },
+          },
+        })
+      : 0;
 
   return {
     orderStatus: order.status,
@@ -563,6 +630,8 @@ export async function getDeliveryTracking(tenantId: string, orderId: string) {
     destinationLng: delivery.destinationLng,
     estimatedDeliveryAt: delivery.estimatedDeliveryAt,
     otherOrdersInRoute,
+    stopSequence: delivery.stopSequence,
+    stopsAheadInRoute,
     canChat: !!delivery.driverId && !OPEN_DELIVERY_STATUSES.includes(delivery.status),
   };
 }

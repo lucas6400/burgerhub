@@ -59,13 +59,18 @@ export function DeliveryMap({
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
   const heatLayerRef = useRef<L.HeatLayer | null>(null);
+  const centeredOnStoreRef = useRef(false);
   const callbacksRef = useRef({ onSelectDelivery, onSelectDriver });
   callbacksRef.current = { onSelectDelivery, onSelectDriver };
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+    // Placeholder só até a localização real da loja carregar (fetch assíncrono
+    // no componente pai) — o efeito abaixo recentraliza assim que ela chegar,
+    // pra nunca ficar preso num centro genérico.
     const center: [number, number] =
       storeLat != null && storeLng != null ? [storeLat, storeLng] : [-15.793889, -47.882778];
+    if (storeLat != null && storeLng != null) centeredOnStoreRef.current = true;
     const map = L.map(containerRef.current).setView(center, 13);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -83,6 +88,16 @@ export function DeliveryMap({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Recentraliza uma única vez quando a localização real da loja chega depois
+  // do mapa já ter sido criado com o placeholder (fetch assíncrono no pai
+  // normalmente ainda não resolveu no primeiro render). Só roda essa vez pra
+  // não brigar com o zoom/posição que o operador ajustar manualmente depois.
+  useEffect(() => {
+    if (centeredOnStoreRef.current || storeLat == null || storeLng == null || !mapRef.current) return;
+    centeredOnStoreRef.current = true;
+    mapRef.current.setView([storeLat, storeLng], 13);
+  }, [storeLat, storeLng]);
 
   // Redesenha só os marcadores e rotas a cada atualização — não recria o mapa
   // (evita piscar/perder zoom a cada polling, item 45 do pedido: performance).
@@ -109,9 +124,24 @@ export function DeliveryMap({
 
     for (const delivery of deliveries) {
       if (delivery.destinationLat == null || delivery.destinationLng == null) continue;
+      const imprecise = delivery.order.deliveryLocationPrecise === false;
       const icon = delivery.risk === "critical" ? ORDER_DELAYED_ICON : ORDER_ICON;
+      // Endereço por quadra (Palmas, Brasília etc.) sem geocodificação exata —
+      // o círculo mostra que o pino é só uma estimativa de bairro, não a casa certa.
+      if (imprecise) {
+        L.circle([delivery.destinationLat, delivery.destinationLng], {
+          radius: 300,
+          color: "#d97706",
+          weight: 1.5,
+          dashArray: "4 4",
+          fillColor: "#f59e0b",
+          fillOpacity: 0.08,
+        }).addTo(layer);
+      }
       const marker = L.marker([delivery.destinationLat, delivery.destinationLng], { icon })
-        .bindTooltip(`Pedido #${delivery.order.number}${delivery.stopSequence ? ` · ${delivery.stopSequence}ª parada` : ""}`)
+        .bindTooltip(
+          `Pedido #${delivery.order.number}${delivery.stopSequence ? ` · ${delivery.stopSequence}ª parada` : ""}${imprecise ? " · ⚠️ localização aproximada" : ""}`,
+        )
         .addTo(layer);
       marker.on("click", () => callbacksRef.current.onSelectDelivery?.(delivery));
     }

@@ -32,6 +32,7 @@ model Tenant {
   settings        TenantSettings?
   businessHours   BusinessHour[]
   deliveryRadiusTiers DeliveryRadiusTier[]
+  deliveryZones   DeliveryZone[]
   users           User[]
   categories      Category[]
   products        Product[]
@@ -51,10 +52,12 @@ model Tenant {
   auditLogs       AuditLog[]
   loyaltyProgram  LoyaltyProgram?
   chatSessions    ChatSession[]
+  whatsAppMessages WhatsAppMessage[]
   payments        Payment[]
   brands          Brand[]
   drivers         Driver[]
   deliveries      Delivery[]
+  pushSubscriptions PushSubscription[]
 }
 
 model TenantSettings {
@@ -68,6 +71,19 @@ model TenantSettings {
   instagram           String?
   facebook            String?
   pixKey              String?
+  // Usados só na conferência automática de comprovante Pix mandado pelo
+  // cliente no WhatsApp (fallback quando o Mercado Pago automático não
+  // confirma sozinho) — em branco, aquele critério específico é pulado na
+  // comparação em vez de reprovar por falta de configuração.
+  pixReceiptExpectedName String?
+  pixReceiptExpectedBank String?
+  // Standby (desligados por padrão) — recursos de cobrança de Pix pelo WhatsApp:
+  botAutoPixEnabled Boolean @default(false) // bot gera o Pix copia-e-cola do Mercado Pago (confirmação automática)
+  pixGateEnabled    Boolean @default(false) // entrega no Pix pelo WhatsApp só vai pra cozinha depois do pagamento confirmado
+  // Rastreamento de vendas no cardápio digital público — não é segredo (roda
+  // no navegador do cliente), por isso é seguro devolver na rota pública do menu.
+  metaPixelId         String? // só o ID numérico — dispara PageView + Purchase automaticamente
+  customHeadScript    String? @db.Text // script de outro pixel (TikTok, GA4...) — usuário avançado
   acceptsDelivery     Boolean @default(true)
   acceptsPickup       Boolean @default(true)
   acceptsDineIn       Boolean @default(true)
@@ -79,12 +95,24 @@ model TenantSettings {
   closedMessage       String  @default("Estamos fechados no momento. Confira nossos horários!")
   paymentMethods      String  @default("PIX,CASH,CREDIT,DEBIT") // CSV: PIX,CASH,CREDIT,DEBIT,VR,VA,ONLINE
   autoPrint           Boolean @default(false)
+  lateOrderNotifyCustomer Boolean @default(false) // também avisa o CLIENTE quando o pedido dele passa do tempo prometido
+  msgOrderLate        String  @default("⏳ Pedido #{n}: estamos com um pouco de atraso por causa do movimento. Já já ele sai — pedimos desculpa pela espera! 🙏")
+  lateOrderAlertEnabled Boolean @default(false) // avisa o dono (WhatsApp) quando um pedido passa do tempo prometido
+  waLabelsEnabled  Boolean @default(false) // aplica etiquetas do WhatsApp Business conforme a etapa do lead
+  followUpEnabled  Boolean @default(false) // manda 1 mensagem pra lead que perguntou e sumiu (ver followup.service.ts)
+  deliveryNotServedText String? // onde NÃO entrega ("Taquaralto e quadras do outro lado, muito distantes") — o bot avisa cedo
+  deliveryAreasDescription String? // texto livre das regiões atendidas ("norte, centro e parte da sul") — o bot usa ao explicar onde entrega
+  orderAlertPhone     String? // telefone (com DDD) que recebe um "ticket" do pedido por WhatsApp — gambiarra pra quem ainda não tem impressora
   // WhatsApp — o lojista conecta só escaneando o QR Code.
   // A infraestrutura (servidor/chaves) é da plataforma, via env.
   waEnabled           Boolean @default(false) // conectado e ativo
   waInstanceName      String? // identificador interno da conexão
   waNumber            String? // número conectado (exibição)
-  botEnabled          Boolean @default(true) // bot de pedidos automático
+  botEnabled          Boolean @default(true) // bot de pedidos automático (fluxo numerado)
+  // Modo beta: IA conduz a conversa inteira (sem menu numerado), em vez de só
+  // reconhecer produto/área de entrega nos pontos de entrada. Desligado por
+  // padrão — liga/desliga por estabelecimento nas Configurações.
+  aiConversationEnabled Boolean @default(false)
   // API oficial da Meta (Cloud API) — alternativa ao Evolution/QR acima, cada
   // tenant conecta o PRÓPRIO número via Embedded Signup (sem QR code). Até a
   // BurgerHub ter o App/Business verificados na Meta, waProvider fica sempre
@@ -162,6 +190,26 @@ model DeliveryRadiusTier {
   @@index([tenantId])
 }
 
+// Área desenhada no mapa (polígono) com preço próprio — verificada ANTES das
+// faixas por distância em quoteDelivery; endereço fora de toda zona cai nas
+// faixas de km de sempre. Resolve o caso de bairros "vizinhos" na distância
+// mas em regiões de entrega diferentes (frete grátis só numa área específica,
+// por exemplo), que km em linha reta sozinho não consegue distinguir.
+model DeliveryZone {
+  id         String  @id @default(cuid())
+  tenantId   String
+  tenant     Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name       String
+  polygon    Json // [{ lat, lng }, ...] — vértices na ordem em que foram desenhados
+  feeCents   Int
+  etaMinutes Int     @default(45)
+  minOrderCents Int? // mínimo específico da zona; null = usa o mínimo global do tenant
+  active     Boolean @default(true)
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
+}
+
 // ---------------- USUÁRIOS ----------------
 
 model User {
@@ -179,9 +227,27 @@ model User {
   passwordResetTokenHash  String?   @unique
   passwordResetExpiresAt  DateTime?
 
-  auditLogs AuditLog[]
+  auditLogs        AuditLog[]
+  pushSubscriptions PushSubscription[]
 
   @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+// Inscrição de notificação push do navegador — um dispositivo/navegador do
+// staff por linha (endpoint é único por navegador). Usada pra avisar de
+// pedido novo mesmo com o painel fechado (Web Push, exige service worker).
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
   @@index([tenantId])
 }
 
@@ -211,6 +277,7 @@ model Product {
   priceCents     Int
   promoPriceCents Int?
   imageUrl       String?
+  whatsappImageUrl String? // foto enviada pelo bot no WhatsApp (separada da foto do cardápio virtual)
   available      Boolean  @default(true)
   showInKds      Boolean  @default(true) // false p/ itens sem preparo (bebidas, sobremesas...) — não aparecem na Cozinha
   prepMinutes    Int      @default(20)
@@ -343,11 +410,15 @@ model Customer {
   notes         String?
   loyaltyPoints Int       @default(0)
   cashbackCents Int       @default(0)
+  buyXProgress  Int       @default(0) // contador do programa "compre X, leve Y" — zera quando a equipe resgata a recompensa
+  passwordHash  String? // null = conta ainda não reivindicada (só tem telefone/nome de pedidos anteriores)
+  lastLoginAt   DateTime?
   createdAt     DateTime  @default(now())
 
   addresses           CustomerAddress[]
   orders              Order[]
   loyaltyTransactions LoyaltyTransaction[]
+  whatsAppMessages    WhatsAppMessage[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -367,6 +438,8 @@ model CustomerAddress {
   cep          String?
   reference    String?
   isDefault    Boolean  @default(false)
+  lat          Float? // confirmado no mapa pelo cliente ao salvar — reusar isso evita o aviso de "localização aproximada" nos próximos pedidos
+  lng          Float?
 }
 
 // ---------------- FIDELIDADE ----------------
@@ -455,7 +528,8 @@ model Order {
   brandName       String? // snapshot — mesma marca pode ser renomeada/removida depois
   type            String    @default("DELIVERY") // DELIVERY | PICKUP | DINE_IN
   source          String    @default("MENU") // MENU | WHATSAPP | POS | TABLE
-  status          String    @default("NEW") // NEW | PREPARING | FINISHING | READY | OUT_FOR_DELIVERY | DELIVERED | SETTLED | CANCELED
+  lateAlertSentAt DateTime? // quando o dono foi avisado que este pedido passou do tempo prometido
+  status          String    @default("NEW") // AWAITING_PAYMENT | NEW | PREPARING | FINISHING | READY | OUT_FOR_DELIVERY | DELIVERED | SETTLED | CANCELED
   priority        Boolean   @default(false)
   subtotalCents   Int
   discountCents   Int       @default(0)
@@ -465,6 +539,11 @@ model Order {
   paymentMethod   String? // PIX | CASH | CREDIT | DEBIT | VR | VA | ONLINE — null = comanda aberta, cobrança pendente (pedido "No local" lançado sem definir forma de pagamento)
   paymentStatus   String    @default("PENDING") // PENDING | PAID | REFUNDED
   changeForCents  Int? // troco para (dinheiro)
+  // Entrega paga no Pix fica em AWAITING_PAYMENT até confirmar — esses dois
+  // campos controlam a conferência automática de comprovante por IA (fallback
+  // quando o Mercado Pago automático não confirma sozinho).
+  pixReceiptAttempts    Int     @default(0)
+  paymentReviewRequired Boolean @default(false)
   couponId        String?
   coupon          Coupon?   @relation(fields: [couponId], references: [id])
   couponCode      String?
@@ -480,6 +559,7 @@ model Order {
   addressReference String?
   deliveryLat     Float? // coordenada resolvida do cliente (mapa/GPS ou geocodificação) — usada pra rastreio/mapa
   deliveryLng     Float?
+  deliveryLocationPrecise Boolean @default(true) // false = geocodificação caiu pro nível de bairro (endereço por quadra) — pino pode estar impreciso, entregador deve confirmar com o cliente
   createdAt       DateTime  @default(now())
   confirmedAt     DateTime?
   readyAt         DateTime?
@@ -689,16 +769,41 @@ model Payment {
 
 // Estado da conversa de cada cliente com o bot (máquina de estados)
 model ChatSession {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  phone     String
-  state     String   @default("MAIN") // MAIN | ORDERING | CHECKOUT_TYPE | CHECKOUT_ADDRESS | CHECKOUT_PAYMENT | CHECKOUT_CHANGE | CONFIRM
-  data      String   @default("{}") // JSON: carrinho, endereço, pagamento em montagem
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  phone          String
+  state          String    @default("MAIN") // MAIN | ORDERING | CHECKOUT_TYPE | CHECKOUT_ADDRESS | CHECKOUT_PAYMENT | CHECKOUT_CHANGE | CONFIRM
+  data           String    @default("{}") // JSON: carrinho, endereço, pagamento em montagem
+  labelStage     String? // etapa atual do lead na etiqueta do WhatsApp Business (ver labels.service.ts)
+  labelStageAt   DateTime?
+  followUpSentAt DateTime? // última retomada enviada a esse lead que sumiu — no máx. 1 por "silêncio"
+  followUpStage2SentAt DateTime? // 2ª recuperação ("últimos pedidos da noite") — só depois da 1ª e perto do fechamento
+  botPausedUntil DateTime? // humano assumiu a conversa na Central de Atendimento — bot ignora mensagens até esse horário
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@unique([tenantId, phone])
+}
+
+// Histórico de mensagens do WhatsApp — alimenta a Central de Atendimento.
+// A "conversa" é derivada agrupando estas mensagens por telefone (sem model próprio).
+model WhatsAppMessage {
+  id         String    @id @default(cuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  phone      String // denormalizado — evita join pra listar/filtrar por telefone
+  direction  String // IN | OUT
+  body       String    @db.Text
+  senderType String    @default("CUSTOMER") // CUSTOMER | BOT | HUMAN | SYSTEM
+  byUserId   String? // quem respondeu manualmente (auditoria), só quando senderType = HUMAN
+  readAt     DateTime? // null = não lida (só relevante pra direction IN)
+  createdAt  DateTime  @default(now())
+
+  @@index([tenantId, phone, createdAt])
+  @@index([tenantId, readAt])
 }
 
 // ---------------- AUDITORIA ----------------

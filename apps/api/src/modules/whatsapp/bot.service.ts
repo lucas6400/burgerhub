@@ -1,5 +1,11 @@
 import { prisma } from "../../lib/prisma.js";
 import { createOrder, quoteDelivery } from "../orders/orders.service.js";
+import { reverseGeocode } from "../orders/geocoding.js";
+import { recognizeCustomerIntent } from "./ai-intent.service.js";
+import { onlinePaymentsAvailable, startPayment } from "../payments/payments.service.js";
+import { handleAiConversation } from "./ai-conversation.service.js";
+import { handleReceiptImage } from "./receipt-verification.service.js";
+import type { WaRawImageMessage } from "./transport.js";
 
 /**
  * Bot de pedidos do WhatsApp — máquina de estados por cliente.
@@ -17,11 +23,14 @@ interface CartItem {
 interface SessionData {
   cart: CartItem[];
   type?: "DELIVERY" | "PICKUP";
-  address?: { street: string; number: string; neighborhood: string; city: string };
+  address?: { street: string; number: string; neighborhood: string; city: string; lat?: number; lng?: number };
   deliveryFeeCents?: number;
   deliveryDistanceKm?: number;
   paymentMethod?: string;
   changeForCents?: number;
+  pendingProductId?: string;
+  pendingProductCode?: string;
+  pendingClarifyContext?: string;
 }
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2h de inatividade reinicia a conversa
@@ -40,6 +49,24 @@ function cartSummary(data: SessionData) {
   return `${lines.join("\n")}\n  *Subtotal: ${brl(cartTotal(data))}*`;
 }
 
+/** Adiciona (ou soma +1 se já existir) um produto já revalidado pela IA — preço sempre do banco, nunca do texto. */
+function addToCart(
+  data: SessionData,
+  product: { id: string; name: string; internalCode: string; priceCents: number; promoPriceCents: number | null },
+) {
+  const price = product.promoPriceCents ?? product.priceCents;
+  const existing = data.cart.find((i) => i.productId === product.id);
+  if (existing) existing.quantity = Math.min(50, existing.quantity + 1);
+  else
+    data.cart.push({
+      productId: product.id,
+      code: product.internalCode,
+      name: product.name,
+      unitPriceCents: price,
+      quantity: 1,
+    });
+}
+
 /** Aceita "2", "2*3" ou "2x3" (código × quantidade), igual ao PDV. */
 function parseCode(raw: string): { code: string; qty: number } | null {
   const m = raw.trim().toLowerCase().match(/^(\d+)\s*[*x]\s*(\d+)$/);
@@ -49,11 +76,24 @@ function parseCode(raw: string): { code: string; qty: number } | null {
   return null;
 }
 
+/** Aceita o número da opção OU a palavra direto (cliente respondendo em texto livre). */
+function parsePaymentMethod(lower: string): string | null {
+  if (["1", "pix"].includes(lower)) return "PIX";
+  if (["2", "dinheiro", "cash", "espécie", "especie", "em dinheiro"].includes(lower)) return "CASH";
+  if (["3", "crédito", "credito", "cartão de crédito", "cartao de credito", "cartão crédito"].includes(lower))
+    return "CREDIT";
+  if (["4", "débito", "debito", "cartão de débito", "cartao de debito", "cartão débito"].includes(lower))
+    return "DEBIT";
+  return null;
+}
+
 export async function handleIncoming(
   tenantId: string,
   phone: string,
   rawText: string,
   pushName?: string,
+  location?: { lat: number; lng: number },
+  image?: WaRawImageMessage,
 ): Promise<string[]> {
   const text = rawText.trim();
   const lower = text.toLowerCase();
@@ -67,6 +107,44 @@ export async function handleIncoming(
   let session = await prisma.chatSession.findUnique({
     where: { tenantId_phone: { tenantId, phone } },
   });
+  // Atendente assumiu essa conversa na Central de Atendimento — bot fica calado.
+  if (session?.botPausedUntil && session.botPausedUntil > new Date()) return [];
+
+  // Comprovante de Pix (imagem) pra um pedido preso esperando pagamento —
+  // trata ANTES de decidir entre os dois modos do bot, então funciona igual
+  // pros dois sem duplicar código. Imagem sem pedido pendente é ignorada
+  // (nenhum dos dois modos faz algo especial com imagem solta hoje).
+  if (image) {
+    const pendingOrder = await prisma.order.findFirst({
+      where: { tenantId, status: "AWAITING_PAYMENT", customer: { phone } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (pendingOrder) return handleReceiptImage(tenantId, pendingOrder, image);
+  }
+
+  // Modo beta: IA conduz a conversa inteira, sem o menu numerado abaixo — o
+  // resto desta função fica intocado pra quem não ativou o interruptor.
+  if (tenant.settings.aiConversationEnabled) {
+    const expiredAi = session && Date.now() - session.updatedAt.getTime() > SESSION_TTL_MS;
+    if (!session || expiredAi) {
+      session = await prisma.chatSession.upsert({
+        where: { tenantId_phone: { tenantId, phone } },
+        update: { state: "AI_CONVO", data: "{}" },
+        create: { tenantId, phone, state: "AI_CONVO", data: "{}" },
+      });
+    }
+    return handleAiConversation(
+      tenantId,
+      phone,
+      text,
+      pushName,
+      { ...tenant, settings: tenant.settings },
+      session,
+      location,
+      image,
+    );
+  }
+
   const expired = session && Date.now() - session.updatedAt.getTime() > SESSION_TTL_MS;
   if (!session || expired) {
     session = await prisma.chatSession.upsert({
@@ -87,7 +165,7 @@ export async function handleIncoming(
   }
 
   // Comandos globais
-  if (["cancelar", "recomeçar", "recomecar", "menu"].includes(lower)) {
+  if (["cancelar", "recomeçar", "recomecar", "menu", "sair", "voltar", "recomeçar tudo", "começar de novo", "comecar de novo"].includes(lower)) {
     data.cart = [];
     data.type = undefined;
     data.address = undefined;
@@ -114,12 +192,135 @@ export async function handleIncoming(
       if (lower === "3") {
         return [hoursText(tenant.businessHours)];
       }
+      // Mensagem livre (ex.: cliente veio de anúncio "Tenho interesse no
+      // X-Bacon", ou pergunta se a loja entrega em tal lugar) — tenta
+      // reconhecer a intenção antes de cair no menu genérico. Sem IA
+      // configurada ou sem reconhecimento, comportamento idêntico ao de sempre.
+      const intent = await recognizeCustomerIntent(tenantId, phone, text, tenant.name);
+      if (intent?.kind === "product") {
+        data.pendingProductId = intent.product.id;
+        data.pendingProductCode = intent.product.internalCode;
+        await save("MAIN_CONFIRM_PRODUCT");
+        return [intent.replyText];
+      }
+      if (
+        intent?.kind === "deliveryArea" ||
+        intent?.kind === "generalDelivery" ||
+        intent?.kind === "storeAddress"
+      ) {
+        return [intent.replyText];
+      }
+      if (intent?.kind === "clarify") {
+        data.pendingClarifyContext = text;
+        await save("MAIN_CLARIFY_PRODUCT");
+        return [intent.question];
+      }
       return [greeting(tenant.name, pushName)];
+    }
+
+    // ------------------------------------------------ ESCLARECENDO QUAL PRODUTO (2+ itens parecidos no catálogo)
+    case "MAIN_CLARIFY_PRODUCT": {
+      const original = data.pendingClarifyContext ?? "";
+
+      const intent = await recognizeCustomerIntent(tenantId, phone, text, tenant.name, original);
+      if (intent?.kind === "product") {
+        data.pendingClarifyContext = undefined;
+        data.pendingProductId = intent.product.id;
+        data.pendingProductCode = intent.product.internalCode;
+        await save("MAIN_CONFIRM_PRODUCT");
+        return [intent.replyText];
+      }
+      if (intent?.kind === "clarify") {
+        data.pendingClarifyContext = `${original} — ${text}`;
+        await save("MAIN_CLARIFY_PRODUCT");
+        return [intent.question];
+      }
+      if (
+        intent?.kind === "deliveryArea" ||
+        intent?.kind === "generalDelivery" ||
+        intent?.kind === "storeAddress"
+      ) {
+        // Responde a pergunta sem perder o fio da meada — a dúvida sobre qual
+        // produto (ex.: 1L ou 2L) continua pendente pra próxima mensagem.
+        return [intent.replyText, "E aí, sobre o combo: qual das opções você prefere?"];
+      }
+      data.pendingClarifyContext = undefined;
+      await save("MAIN");
+      return ["Não consegui identificar certinho. 🤔", greeting(tenant.name, pushName)];
+    }
+
+    // ------------------------------------------------ CONFIRMAÇÃO DE PRODUTO RECONHECIDO PELA IA
+    case "MAIN_CONFIRM_PRODUCT": {
+      const negative = ["não", "nao", "n", "cancelar", "agora não", "agora nao", "depois"].includes(lower);
+      const affirmative = ["sim", "s", "quero", "bora", "adicionar", "pode ser", "claro", "1"].includes(lower);
+      const code = data.pendingProductCode;
+
+      if (negative || !code) {
+        data.pendingProductId = undefined;
+        data.pendingProductCode = undefined;
+        await save("MAIN");
+        return [greeting(tenant.name, pushName)];
+      }
+
+      if (!affirmative) {
+        // Não foi um "sim" nem um "não" claro — em vez de desistir e jogar o
+        // cliente de volta pro menu genérico (o que ficava "engessado" demais
+        // pra quem só queria escolher o tamanho certo do combo, por ex.),
+        // deixa a IA reinterpretar a resposta à luz do catálogo de novo.
+        const intent = await recognizeCustomerIntent(
+          tenantId,
+          phone,
+          text,
+          tenant.name,
+          `estava confirmando o item de código ${code}`,
+        );
+        if (intent?.kind === "product") {
+          data.pendingProductId = intent.product.id;
+          data.pendingProductCode = intent.product.internalCode;
+          await save("MAIN_CONFIRM_PRODUCT");
+          return [intent.replyText];
+        }
+        if (
+          intent?.kind === "deliveryArea" ||
+          intent?.kind === "generalDelivery" ||
+          intent?.kind === "storeAddress"
+        ) {
+          // Responde sem perder o item pendente — o cliente ainda pode
+          // confirmar com *sim* na próxima mensagem.
+          return [intent.replyText, "E sobre o pedido: posso confirmar? Digite *sim* ou *cancelar*."];
+        }
+        return ["Não entendi bem. 🤔 Pode confirmar com *sim*, pedir outro item, ou digitar *cancelar*."];
+      }
+
+      data.pendingProductId = undefined;
+      data.pendingProductCode = undefined;
+
+      // Revalida do zero — o item pode ter ficado indisponível nesse meio-tempo.
+      const product = await prisma.product.findFirst({
+        where: { tenantId, internalCode: code, available: true },
+      });
+      if (!product) {
+        await save("MAIN");
+        return ["Poxa, esse item não está mais disponível. 😕", greeting(tenant.name, pushName)];
+      }
+
+      const price = product.promoPriceCents ?? product.priceCents;
+      data.cart.push({
+        productId: product.id,
+        code: product.internalCode!,
+        name: product.name,
+        unitPriceCents: price,
+        quantity: 1,
+      });
+      await save("ORDERING");
+      return [
+        `✅ 1× *${product.name}* adicionado!\n\n${cartSummary(data)}\n\nEnvie mais códigos, *ok* para finalizar ou *limpar* para esvaziar.`,
+      ];
     }
 
     // ------------------------------------------------ MONTANDO O PEDIDO
     case "ORDERING": {
-      if (lower === "ok" || lower === "finalizar") {
+      if (["ok", "finalizar", "pronto", "só isso", "so isso", "fechar pedido", "chega"].includes(lower)) {
         if (data.cart.length === 0) {
           return ["Seu carrinho ainda está vazio. Envie o código de um item para adicionar. 😉"];
         }
@@ -134,42 +335,98 @@ export async function handleIncoming(
         return ["🗑️ Carrinho esvaziado. Envie o código de um item para começar de novo."];
       }
       const parsed = parseCode(text);
-      if (!parsed) {
+      if (parsed) {
+        const product = await prisma.product.findFirst({
+          where: { tenantId, internalCode: parsed.code },
+        });
+        if (!product) return [`Não encontrei o código *${parsed.code}*. Confira no cardápio acima. 😉`];
+        if (!product.available) return [`Poxa, *${product.name}* está esgotado hoje. 😔`];
+
+        const price = product.promoPriceCents ?? product.priceCents;
+        const existing = data.cart.find((i) => i.productId === product.id);
+        if (existing) existing.quantity = Math.min(50, existing.quantity + parsed.qty);
+        else
+          data.cart.push({
+            productId: product.id,
+            code: parsed.code,
+            name: product.name,
+            unitPriceCents: price,
+            quantity: parsed.qty,
+          });
+        await save("ORDERING");
         return [
-          "Não entendi. 🤔 Envie o *código* do item (ex.: *2* ou *2x3*), *ok* para finalizar ou *cancelar* para recomeçar.",
+          `✅ ${parsed.qty}× *${product.name}* adicionado!\n\n${cartSummary(data)}\n\nEnvie mais códigos, *ok* para finalizar ou *limpar* para esvaziar.`,
         ];
       }
-      const product = await prisma.product.findFirst({
-        where: { tenantId, internalCode: parsed.code },
-      });
-      if (!product) return [`Não encontrei o código *${parsed.code}*. Confira no cardápio acima. 😉`];
-      if (!product.available) return [`Poxa, *${product.name}* está esgotado hoje. 😔`];
 
-      const price = product.promoPriceCents ?? product.priceCents;
-      const existing = data.cart.find((i) => i.productId === product.id);
-      if (existing) existing.quantity = Math.min(50, existing.quantity + parsed.qty);
-      else
-        data.cart.push({
-          productId: product.id,
-          code: parsed.code,
-          name: product.name,
-          unitPriceCents: price,
-          quantity: parsed.qty,
-        });
-      await save("ORDERING");
+      // Não é um código — tenta reconhecer pergunta/produto por linguagem
+      // natural (mesmo mecanismo do início da conversa) antes de desistir.
+      // É o ponto mais comum de o cliente perguntar algo no meio do pedido
+      // (ex.: "vocês entregam aí?"), então merece o mesmo tratamento.
+      const intent = await recognizeCustomerIntent(tenantId, phone, text, tenant.name);
+      if (intent?.kind === "product") {
+        addToCart(data, intent.product);
+        await save("ORDERING");
+        return [
+          `✅ 1× *${intent.product.name}* adicionado!\n\n${cartSummary(data)}\n\nEnvie mais códigos, *ok* para finalizar ou *limpar* para esvaziar.`,
+        ];
+      }
+      if (intent?.kind === "clarify") {
+        data.pendingClarifyContext = text;
+        await save("ORDERING_CLARIFY");
+        return [intent.question];
+      }
+      if (
+        intent?.kind === "deliveryArea" ||
+        intent?.kind === "generalDelivery" ||
+        intent?.kind === "storeAddress"
+      ) {
+        return [intent.replyText];
+      }
       return [
-        `✅ ${parsed.qty}× *${product.name}* adicionado!\n\n${cartSummary(data)}\n\nEnvie mais códigos, *ok* para finalizar ou *limpar* para esvaziar.`,
+        "Não entendi. 🤔 Envie o *código* do item (ex.: *2* ou *2x3*), *ok* para finalizar ou *cancelar* para recomeçar.",
       ];
+    }
+
+    // ------------------------------------------------ ESCLARECENDO QUAL PRODUTO (durante a montagem do pedido)
+    case "ORDERING_CLARIFY": {
+      const original = data.pendingClarifyContext ?? "";
+      const intent = await recognizeCustomerIntent(tenantId, phone, text, tenant.name, original);
+      if (intent?.kind === "product") {
+        data.pendingClarifyContext = undefined;
+        addToCart(data, intent.product);
+        await save("ORDERING");
+        return [
+          `✅ 1× *${intent.product.name}* adicionado!\n\n${cartSummary(data)}\n\nEnvie mais códigos, *ok* para finalizar ou *limpar* para esvaziar.`,
+        ];
+      }
+      if (intent?.kind === "clarify") {
+        data.pendingClarifyContext = `${original} — ${text}`;
+        await save("ORDERING_CLARIFY");
+        return [intent.question];
+      }
+      if (
+        intent?.kind === "deliveryArea" ||
+        intent?.kind === "generalDelivery" ||
+        intent?.kind === "storeAddress"
+      ) {
+        return [intent.replyText, "E sobre o item: qual das opções você prefere?"];
+      }
+      data.pendingClarifyContext = undefined;
+      await save("ORDERING");
+      return ["Não consegui identificar certinho. 🤔 Envie o *código* do item, ou me diga de novo o que você quer."];
     }
 
     // ------------------------------------------------ ENTREGA OU RETIRADA
     case "CHECKOUT_TYPE": {
-      if (lower === "1") {
+      if (["1", "entrega", "delivery", "entregar"].includes(lower)) {
         data.type = "DELIVERY";
         await save("CHECKOUT_ADDRESS");
-        return ["🏠 Me envie seu endereço completo:\n*rua, número, bairro*\nEx.: Rua das Flores, 123, Centro"];
+        return [
+          "📍 Me envie sua *localização* pelo WhatsApp:\ntoque no 📎 (clipe) → *Localização* → *Enviar localização atual*.\n\nSe preferir, pode digitar o endereço (rua, número, bairro).",
+        ];
       }
-      if (lower === "2") {
+      if (["2", "retirada", "retirar", "buscar", "balcão", "balcao"].includes(lower)) {
         data.type = "PICKUP";
         await save("CHECKOUT_PAYMENT");
         return [paymentPrompt()];
@@ -179,27 +436,50 @@ export async function handleIncoming(
 
     // ------------------------------------------------ ENDEREÇO
     case "CHECKOUT_ADDRESS": {
-      const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
-      if (parts.length < 3) {
-        return [
-          "Preciso de *rua, número e bairro*, separados por vírgula. 🙏\nEx.: Rua das Flores, 123, Centro",
-        ];
+      let address: { street: string; number: string; neighborhood: string; city: string };
+      const lat = location?.lat;
+      const lng = location?.lng;
+
+      if (location) {
+        const reverse = await reverseGeocode(location);
+        // Bairro fica de fora: em Palmas (endereço por quadra) o geocodificador
+        // gratuito costuma "chutar" um distrito genérico ("103 Norte") mesmo com
+        // o PINO certo — já confundiu a equipe achando que a localização veio errada.
+        address = { ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }), neighborhood: "" };
+      } else {
+        const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
+        // Formato ideal é "rua, número, bairro", mas se o cliente mandar
+        // corrido (sem vírgulas certinhas), tenta geocodificar o texto
+        // inteiro em vez de travar pedindo pra reformatar.
+        address =
+          parts.length >= 3
+            ? { street: parts[0], number: parts[1], neighborhood: parts[2], city: parts[3] ?? parts[2] }
+            : { street: "", number: "", neighborhood: text, city: "" };
       }
-      const address = {
-        street: parts[0],
-        number: parts[1],
-        neighborhood: parts[2],
-        city: parts[3] ?? parts[2],
-      };
+
       // Taxa calculada automaticamente pela distância até o estabelecimento
       try {
-        const quote = await quoteDelivery(tenantId, address, cartTotal(data));
-        data.address = address;
+        const quote = await quoteDelivery(tenantId, { ...address, lat, lng }, cartTotal(data));
+        // Texto sem pino cai num ponto "chutado" do bairro — dentro de zona desenhada
+        // isso pode aceitar entrega fora da área. Sem certeza, exige a localização.
+        if (!location && !quote.precise && quote.zoneName) {
+          return ["📍 Não consigo confirmar esse endereço só pelo texto. Me manda sua *localização*: toque no 📎 (clipe) → *Localização* → *Enviar localização atual*."];
+        }
+        // Sem vir de localização/formato estruturado, tenta transformar o ponto
+        // encontrado num endereço legível pra guardar/mostrar mais bonito.
+        if (!location && !address.number) {
+          const reverse = await reverseGeocode(quote.point);
+          if (reverse) address = reverse;
+        }
+        // Guarda o pino quando veio de localização — senão o pedido re-geocodifica o texto.
+        data.address = location ? { ...address, lat, lng } : address;
         data.deliveryFeeCents = quote.feeCents;
         data.deliveryDistanceKm = quote.distanceKm;
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Não consegui calcular a entrega para esse endereço.";
-        return [`😕 ${msg}\nPode me enviar novamente? Ex.: Rua das Flores, 123, Centro`];
+        return [
+          `😕 ${msg}\nPode me mandar sua 📍 *localização*? (📎 → *Localização* → *Enviar localização atual*). Se preferir, digite o endereço.`,
+        ];
       }
       await save("CHECKOUT_PAYMENT");
       const feeMsg =
@@ -211,8 +491,7 @@ export async function handleIncoming(
 
     // ------------------------------------------------ PAGAMENTO
     case "CHECKOUT_PAYMENT": {
-      const map: Record<string, string> = { "1": "PIX", "2": "CASH", "3": "CREDIT", "4": "DEBIT" };
-      const method = map[lower];
+      const method = parsePaymentMethod(lower);
       if (!method) return [paymentPrompt()];
       data.paymentMethod = method;
       if (method === "CASH") {
@@ -235,15 +514,41 @@ export async function handleIncoming(
 
     // ------------------------------------------------ CONFIRMAÇÃO
     case "CONFIRM": {
-      if (!["confirmar", "confirmo", "sim"].includes(lower)) {
+      const affirmativeConfirm = [
+        "confirmar",
+        "confirmo",
+        "confirmado",
+        "sim",
+        "s",
+        "ok",
+        "okay",
+        "beleza",
+        "blz",
+        "fechado",
+        "certo",
+        "isso",
+        "pode confirmar",
+        "pode ser",
+        "manda",
+        "correto",
+      ];
+      if (!affirmativeConfirm.includes(lower)) {
         return ["Digite *confirmar* para enviar o pedido ou *cancelar* para recomeçar. 😉"];
       }
       try {
+        // Pix automático via Mercado Pago quando o estabelecimento tem online
+        // conectado — o pedido nasce "ONLINE" (mesmo campo que o cardápio web
+        // usa) pra reaproveitar os selos de pagamento já existentes no painel.
+        // Sem Mercado Pago conectado (ou se a chamada falhar), cai no fluxo
+        // manual de sempre (chave fixa + comprovante), sem travar o pedido.
+        const useOnlinePix =
+          data.paymentMethod === "PIX" && tenant.settings.botAutoPixEnabled && onlinePaymentsAvailable(tenant.settings);
+
         const order = await createOrder({
           tenantId,
           source: "WHATSAPP",
           type: data.type ?? "PICKUP",
-          paymentMethod: data.paymentMethod ?? "PIX",
+          paymentMethod: useOnlinePix ? "ONLINE" : (data.paymentMethod ?? "PIX"),
           changeForCents: data.changeForCents,
           customer: { name: pushName || `Cliente ${phone.slice(-4)}`, phone },
           address: data.address,
@@ -251,12 +556,46 @@ export async function handleIncoming(
         });
         data.cart = [];
         await save("MAIN");
-        const pixLine =
-          order.paymentMethod === "PIX" && tenant.settings.pixKey
-            ? `\n\n💠 Chave Pix: *${tenant.settings.pixKey}*\nEnvie o comprovante por aqui. 🙏`
-            : "";
+
+        // O código do Pix vai numa mensagem SÓ dele (sem nenhum outro texto
+        // junto) — no WhatsApp, um toque-e-segure copia a mensagem inteira, e
+        // misturado com o resto do texto fica fácil copiar errado.
+        let pixIntro = "";
+        let pixCode = "";
+        if (useOnlinePix) {
+          try {
+            const payment = await startPayment({ tenantId, tenantSlug: tenant.slug, orderId: order.id, method: "PIX" });
+            if (payment.pixQrCode) {
+              pixIntro = "💠 *Pix Copia e Cola* — toque e segure a mensagem abaixo pra copiar:";
+              pixCode = payment.pixQrCode;
+            }
+          } catch (err) {
+            console.error("Falha ao gerar Pix automático, cliente cai no fluxo manual:", err);
+          }
+        }
+        if (!pixCode && order.paymentMethod === "PIX" && tenant.settings.pixKey) {
+          pixIntro = "💠 *Chave Pix* — toque e segure a mensagem abaixo pra copiar:";
+          pixCode = tenant.settings.pixKey;
+        }
+        // Entrega no Pix fica presa (AWAITING_PAYMENT) até confirmar o
+        // pagamento — nunca afirmar que já entrou em produção nesse caso.
+        // Retirada no Pix (não bloqueada) mantém o texto simples de sempre.
+        const isGated = order.status === "AWAITING_PAYMENT";
+        const pixFollowUp = useOnlinePix
+          ? "Assim que cair, confirmo automaticamente por aqui — não precisa mandar comprovante. ✅"
+          : !pixCode
+            ? ""
+            : isGated
+              ? "Envie o comprovante aqui assim que pagar — eu confiro automaticamente e libero seu pedido pra cozinha. 🙏"
+              : "Envie o comprovante por aqui. 🙏";
+        const closingLine = isGated
+          ? "Assim que o Pix cair, seu pedido entra direto na produção! 🍔"
+          : "Vou te avisando por aqui a cada etapa! 🍔";
+
         return [
-          `🎉 *Pedido #${order.number} confirmado!*\nTotal: *${brl(order.totalCents)}*\nTempo estimado: ${tenant.settings.defaultPrepMinutes}–${tenant.settings.defaultPrepMinutes + 20} min.${pixLine}\n\nVou te avisando por aqui a cada etapa! 🍔`,
+          `🎉 *Pedido #${order.number} confirmado!*\nTotal: *${brl(order.totalCents)}*\nTempo estimado: ${tenant.settings.defaultPrepMinutes}–${tenant.settings.defaultPrepMinutes + 20} min.\n\n${closingLine}`,
+          ...(pixCode ? [pixIntro, pixCode] : []),
+          ...(pixFollowUp ? [pixFollowUp] : []),
         ];
       } catch (err) {
         await save("MAIN");

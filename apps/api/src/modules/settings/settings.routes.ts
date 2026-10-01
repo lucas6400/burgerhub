@@ -8,19 +8,37 @@ import { AppError } from "../../middlewares/error.js";
 import { rateLimit } from "../../middlewares/rateLimit.js";
 import { geocodeAddress, reverseGeocode } from "../orders/geocoding.js";
 import { audit } from "../../utils/audit.js";
+import { isStoreOpenNow } from "../../utils/storeTime.js";
 
 export const settingsRoutes = Router();
 settingsRoutes.use(requireAuth);
+
+/** Status rápido pro controle "Loja aberta/fechada agora" do Dashboard — leve, sem os dados sensíveis do GET "/". */
+settingsRoutes.get(
+  "/store-status",
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const [settings, hours] = await Promise.all([
+      prisma.tenantSettings.findUnique({ where: { tenantId }, select: { isOpenOverride: true } }),
+      prisma.businessHour.findMany({ where: { tenantId } }),
+    ]);
+    res.json({
+      isOpenOverride: settings?.isOpenOverride ?? null,
+      openNow: isStoreOpenNow({ isOpenOverride: settings?.isOpenOverride, businessHours: hours }),
+    });
+  }),
+);
 
 settingsRoutes.get(
   "/",
   h(async (req, res) => {
     const tenantId = tenantOf(req);
-    const [tenant, settings, hours, tiers] = await Promise.all([
+    const [tenant, settings, hours, tiers, zones] = await Promise.all([
       prisma.tenant.findUnique({ where: { id: tenantId } }),
       prisma.tenantSettings.findUnique({ where: { tenantId } }),
       prisma.businessHour.findMany({ where: { tenantId }, orderBy: { weekday: "asc" } }),
       prisma.deliveryRadiusTier.findMany({ where: { tenantId }, orderBy: { maxKm: "asc" } }),
+      prisma.deliveryZone.findMany({ where: { tenantId }, orderBy: { createdAt: "asc" } }),
     ]);
     // Nunca devolve tokens/secrets nem o interruptor interno de split; só sinaliza se estão configurados
     const { mpAccessToken, mpRefreshToken, mpUserId, mpSplitEnabled, ifoodClientSecret, waCloudAccessToken, ...safeSettings } =
@@ -32,6 +50,7 @@ settingsRoutes.get(
         : null,
       businessHours: hours,
       deliveryRadiusTiers: tiers,
+      deliveryZones: zones,
     });
   }),
 );
@@ -107,6 +126,18 @@ const settingsSchema = z.object({
   instagram: z.string().optional().nullable(),
   facebook: z.string().optional().nullable(),
   pixKey: z.string().optional().nullable(),
+  pixReceiptExpectedName: z.string().optional().nullable(),
+  pixReceiptExpectedBank: z.string().optional().nullable(),
+  botAutoPixEnabled: z.boolean().optional(),
+  pixGateEnabled: z.boolean().optional(),
+  metaPixelId: z
+    .string()
+    .trim()
+    .regex(/^\d+$/, "O ID do Pixel só tem números")
+    .max(30)
+    .optional()
+    .nullable(),
+  customHeadScript: z.string().trim().max(5000).optional().nullable(),
   acceptsDelivery: z.boolean().optional(),
   acceptsPickup: z.boolean().optional(),
   acceptsDineIn: z.boolean().optional(),
@@ -121,7 +152,16 @@ const settingsSchema = z.object({
   closedMessage: z.string().optional(),
   paymentMethods: z.string().optional(),
   autoPrint: z.boolean().optional(),
+  orderAlertPhone: z.string().optional().nullable(),
+  deliveryAreasDescription: z.string().max(300).optional().nullable(),
+  deliveryNotServedText: z.string().max(300).optional().nullable(),
+  followUpEnabled: z.boolean().optional(),
+  waLabelsEnabled: z.boolean().optional(),
+  lateOrderAlertEnabled: z.boolean().optional(),
+  lateOrderNotifyCustomer: z.boolean().optional(),
+  msgOrderLate: z.string().optional(),
   botEnabled: z.boolean().optional(),
+  aiConversationEnabled: z.boolean().optional(),
   mpEnabled: z.boolean().optional(),
   mpAccessToken: z.string().optional().nullable(),
   mpPublicKey: z.string().optional().nullable(),
@@ -216,9 +256,9 @@ settingsRoutes.post(
   rateLimit(10, 60_000),
   h(async (req, res) => {
     const { address } = z.object({ address: z.string().min(5) }).parse(req.body);
-    const point = await geocodeAddress(`${address}, Brasil`);
-    if (!point) throw new AppError(404, "Endereço não encontrado. Tente ser mais específico.");
-    res.json(point);
+    const geo = await geocodeAddress(`${address}, Brasil`);
+    if (!geo) throw new AppError(404, "Endereço não encontrado. Tente ser mais específico.");
+    res.json(geo.point);
   }),
 );
 
@@ -311,6 +351,79 @@ settingsRoutes.delete(
       userId: req.auth!.userId,
       action: "DELETE",
       entity: "DeliveryRadiusTier",
+      entityId: req.params.id,
+    });
+    res.status(204).end();
+  }),
+);
+
+// ---------------- ZONAS DE ENTREGA (polígono desenhado no mapa) ----------------
+
+const zonePointSchema = z.object({ lat: z.number(), lng: z.number() });
+const zoneSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  polygon: z.array(zonePointSchema).min(3, "Marque pelo menos 3 pontos no mapa"),
+  feeCents: z.number().int().min(0),
+  etaMinutes: z.number().int().min(1).optional(),
+  active: z.boolean().optional(),
+});
+
+settingsRoutes.post(
+  "/delivery-zones",
+  requireRole("MANAGER"),
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const data = zoneSchema.parse(req.body);
+    const zone = await prisma.deliveryZone.create({ data: { ...data, tenantId } });
+    await audit({
+      tenantId,
+      userId: req.auth!.userId,
+      action: "CREATE",
+      entity: "DeliveryZone",
+      entityId: zone.id,
+      detail: { name: data.name, feeCents: data.feeCents },
+    });
+    res.status(201).json(zone);
+  }),
+);
+
+settingsRoutes.put(
+  "/delivery-zones/:id",
+  requireRole("MANAGER"),
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const data = zoneSchema.partial().parse(req.body);
+    const { count } = await prisma.deliveryZone.updateMany({
+      where: { id: req.params.id, tenantId },
+      data,
+    });
+    if (!count) throw new AppError(404, "Zona de entrega não encontrada");
+    await audit({
+      tenantId,
+      userId: req.auth!.userId,
+      action: "UPDATE",
+      entity: "DeliveryZone",
+      entityId: req.params.id,
+      detail: { name: data.name },
+    });
+    res.json(await prisma.deliveryZone.findUnique({ where: { id: req.params.id } }));
+  }),
+);
+
+settingsRoutes.delete(
+  "/delivery-zones/:id",
+  requireRole("MANAGER"),
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const { count } = await prisma.deliveryZone.deleteMany({
+      where: { id: req.params.id, tenantId },
+    });
+    if (!count) throw new AppError(404, "Zona de entrega não encontrada");
+    await audit({
+      tenantId,
+      userId: req.auth!.userId,
+      action: "DELETE",
+      entity: "DeliveryZone",
       entityId: req.params.id,
     });
     res.status(204).end();

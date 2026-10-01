@@ -2,19 +2,13 @@ import { Router } from "express";
 import { prisma } from "../../lib/prisma.js";
 import { h } from "../../lib/http.js";
 import { requireAuth, tenantOf } from "../../middlewares/auth.js";
+import { dateKeyInStoreTimezone, hourInStoreTimezone, startOfDayInStoreTimezone } from "../../utils/storeTime.js";
 
 export const dashboardRoutes = Router();
 dashboardRoutes.use(requireAuth);
 
-function startOfDay(d = new Date()) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
 function daysAgo(n: number) {
-  const x = startOfDay();
-  x.setDate(x.getDate() - n);
-  return x;
+  return startOfDayInStoreTimezone(n);
 }
 
 const REVENUE_STATUSES = [
@@ -31,7 +25,7 @@ dashboardRoutes.get(
   "/summary",
   h(async (req, res) => {
     const tenantId = tenantOf(req);
-    const today = startOfDay();
+    const today = daysAgo(0);
     const weekStart = daysAgo(6);
     const monthStart = daysAgo(29);
 
@@ -97,20 +91,19 @@ dashboardRoutes.get(
     // Vendas por dia (últimos 14 dias)
     const byDay = new Map<string, { revenueCents: number; orders: number }>();
     for (let i = 13; i >= 0; i--) {
-      const d = daysAgo(i);
-      byDay.set(d.toISOString().slice(0, 10), { revenueCents: 0, orders: 0 });
+      byDay.set(dateKeyInStoreTimezone(daysAgo(i)), { revenueCents: 0, orders: 0 });
     }
     // Horários de pico
     const byHour = Array.from({ length: 24 }, (_, hour) => ({ hour, orders: 0 }));
 
     for (const o of orders) {
-      const key = o.createdAt.toISOString().slice(0, 10);
+      const key = dateKeyInStoreTimezone(o.createdAt);
       const day = byDay.get(key);
       if (day) {
         day.revenueCents += o.totalCents;
         day.orders += 1;
       }
-      byHour[o.createdAt.getHours()].orders += 1;
+      byHour[hourInStoreTimezone(o.createdAt)].orders += 1;
     }
 
     // Produtos mais / menos vendidos (30 dias)

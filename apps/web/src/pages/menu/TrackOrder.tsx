@@ -1,13 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { CheckCircle2, MapPinned, MessageCircle, Send } from "lucide-react";
+import { CheckCircle2, MapPinned, MessageCircle, Send, Star } from "lucide-react";
 import { api } from "../../lib/api";
-import { brl } from "../../lib/format";
+import { brl, PAYMENT_LABELS } from "../../lib/format";
 import { CustomerTrackingMap } from "../../components/delivery/CustomerTrackingMap";
+
+interface OrderItemAddon {
+  nameSnapshot: string;
+  quantity: number;
+  unitPriceCents: number;
+}
+interface OrderItem {
+  nameSnapshot: string;
+  quantity: number;
+  unitPriceCents: number;
+  addons: OrderItemAddon[];
+  removals: { nameSnapshot: string }[];
+}
 
 interface TrackingData {
   tenant: { name: string; logoUrl?: string | null; address?: string | null; storeLat?: number | null; storeLng?: number | null };
-  order: { number: number; totalCents: number; type: "DELIVERY" | "PICKUP" | "DINE_IN"; status: string };
+  order: {
+    number: number;
+    totalCents: number;
+    type: "DELIVERY" | "PICKUP" | "DINE_IN";
+    status: string;
+    subtotalCents: number;
+    discountCents: number;
+    deliveryFeeCents: number;
+    paymentMethod: string | null;
+    cancelReason: string | null;
+    items: OrderItem[];
+  };
   deliveryId: string | null;
   deliveryStatusLabel: string | null;
   driverName: string | null;
@@ -17,6 +41,8 @@ interface TrackingData {
   destinationLng: number | null;
   estimatedDeliveryAt: string | null;
   otherOrdersInRoute: number;
+  stopSequence: number | null;
+  stopsAheadInRoute: number;
   canChat: boolean;
 }
 
@@ -167,7 +193,8 @@ export function TrackOrderPage() {
 
         {canceled ? (
           <div className="rounded-2xl border border-red-200 bg-red-500/5 p-6 text-center text-sm text-red-600 dark:border-red-800 dark:text-red-400">
-            Esse pedido foi cancelado.
+            <p>Esse pedido foi cancelado.</p>
+            {order.cancelReason && <p className="mt-1 text-xs text-red-500/80">{order.cancelReason}</p>}
           </div>
         ) : (
           <>
@@ -211,12 +238,76 @@ export function TrackOrderPage() {
                   Chega {eta}
                 </p>
               )}
-              {data.otherOrdersInRoute > 0 && step < 3 && (
+              {data.stopSequence != null && step < 3 && (
+                <p className="mt-2 text-center text-xs text-surface-400">
+                  {data.stopsAheadInRoute === 0
+                    ? "Você é a próxima parada da rota."
+                    : data.stopsAheadInRoute === 1
+                      ? "Falta 1 entrega antes da sua nessa rota."
+                      : `Faltam ${data.stopsAheadInRoute} entregas antes da sua nessa rota.`}
+                </p>
+              )}
+              {data.stopSequence == null && data.otherOrdersInRoute > 0 && step < 3 && (
                 <p className="mt-2 text-center text-xs text-surface-400">
                   Seu entregador está levando mais {data.otherOrdersInRoute}{" "}
                   {data.otherOrdersInRoute === 1 ? "pedido" : "pedidos"} nessa rota.
                 </p>
               )}
+            </div>
+
+            {/* Itens do pedido */}
+            <div className="rounded-2xl border border-surface-200 bg-white p-4 dark:border-surface-800 dark:bg-surface-900">
+              <h2 className="mb-3 text-sm font-semibold">Itens do pedido</h2>
+              <div className="space-y-2.5">
+                {order.items.map((item, i) => (
+                  <div key={i} className="text-sm">
+                    <div className="flex justify-between">
+                      <span>
+                        {item.quantity}× {item.nameSnapshot}
+                      </span>
+                      <span className="text-surface-500">{brl(item.unitPriceCents * item.quantity)}</span>
+                    </div>
+                    {item.addons.map((a, ai) => (
+                      <p key={ai} className="pl-4 text-xs text-surface-400">
+                        + {a.quantity > 1 ? `${a.quantity}× ` : ""}
+                        {a.nameSnapshot}
+                      </p>
+                    ))}
+                    {item.removals.map((r, ri) => (
+                      <p key={ri} className="pl-4 text-xs text-surface-400">
+                        sem {r.nameSnapshot}
+                      </p>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 space-y-1 border-t border-surface-100 pt-3 text-sm dark:border-surface-800">
+                <div className="flex justify-between text-surface-500">
+                  <span>Subtotal</span>
+                  <span>{brl(order.subtotalCents)}</span>
+                </div>
+                {order.discountCents > 0 && (
+                  <div className="flex justify-between text-emerald-600 dark:text-emerald-400">
+                    <span>Desconto</span>
+                    <span>-{brl(order.discountCents)}</span>
+                  </div>
+                )}
+                {order.deliveryFeeCents > 0 && (
+                  <div className="flex justify-between text-surface-500">
+                    <span>Taxa de entrega</span>
+                    <span>{brl(order.deliveryFeeCents)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-bold">
+                  <span>Total</span>
+                  <span>{brl(order.totalCents)}</span>
+                </div>
+                {order.paymentMethod && (
+                  <p className="pt-1 text-xs text-surface-400">
+                    Pagamento: {PAYMENT_LABELS[order.paymentMethod] ?? order.paymentMethod}
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* Retirada: endereço da loja */}
@@ -302,6 +393,15 @@ export function TrackOrderPage() {
                   </button>
                 </div>
               </div>
+            )}
+
+            {["DELIVERED", "SETTLED"].includes(order.status) && (
+              <a
+                href={`/cardapio/${slug}/avaliar/${orderId}`}
+                className="flex items-center justify-center gap-1.5 rounded-2xl border border-brand-300 bg-brand-500/5 py-3 text-sm font-semibold text-brand-700 dark:border-brand-700 dark:text-brand-400"
+              >
+                <Star size={15} /> Avaliar pedido
+              </a>
             )}
           </>
         )}

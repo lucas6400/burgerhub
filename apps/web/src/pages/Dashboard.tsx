@@ -24,6 +24,7 @@ import {
 import { api } from "../lib/api";
 import { brl } from "../lib/format";
 import { Card, PageHeader, Skeleton } from "../components/ui";
+import { StoreStatusControl } from "../components/StoreStatusControl";
 
 interface Summary {
   revenueTodayCents: number;
@@ -115,6 +116,10 @@ export function DashboardPage() {
   return (
     <div className="animate-fade-in">
       <PageHeader title="Dashboard" subtitle="Visão geral do seu negócio" />
+
+      <div className="mb-4">
+        <StoreStatusControl />
+      </div>
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
         <KpiCard

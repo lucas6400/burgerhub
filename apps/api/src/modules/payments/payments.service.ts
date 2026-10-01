@@ -1,7 +1,9 @@
 import { prisma } from "../../lib/prisma.js";
+import { background } from "../../lib/background.js";
 import { env } from "../../config/env.js";
 import { AppError } from "../../middlewares/error.js";
 import { mpClient, type MpStatus } from "./mp.client.js";
+import { updateOrderStatus } from "../orders/orders.service.js";
 
 /**
  * Orquestra pagamentos online do cardápio digital (Pix e cartão).
@@ -153,7 +155,7 @@ export async function startPayment(params: {
 async function approvePayment(paymentId: string) {
   const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
   if (!payment || payment.status === "APPROVED") return;
-  await prisma.$transaction([
+  const [, order] = await prisma.$transaction([
     prisma.payment.update({
       where: { id: payment.id },
       data: { status: "APPROVED", paidAt: new Date() },
@@ -161,8 +163,40 @@ async function approvePayment(paymentId: string) {
     prisma.order.update({
       where: { id: payment.orderId },
       data: { paymentStatus: "PAID" },
+      include: { customer: true },
     }),
   ]);
+
+  // Entrega paga no Pix ficava presa esperando o pagamento (AWAITING_PAYMENT)
+  // — o webhook automático do Mercado Pago é um dos 3 caminhos que libera pra
+  // produção (ver updateOrderStatus, mesmo mecanismo usado pelo comprovante
+  // lido por IA e pela liberação manual do staff).
+  if (order.status === "AWAITING_PAYMENT") {
+    await updateOrderStatus({ tenantId: order.tenantId, orderId: order.id, toStatus: "NEW" }).catch((err) =>
+      console.error("Falha ao liberar pedido da fila de pagamento:", err),
+    );
+  }
+
+  if (order.source === "WHATSAPP" && order.customer?.phone) {
+    background(notifyPaymentApproved(order.tenantId, { ...order, customer: order.customer }).catch((err) =>
+      console.error("Falha ao notificar aprovação de pagamento pelo WhatsApp:", err),
+    ));
+  }
+}
+
+/** Avisa o cliente pelo WhatsApp que o Pix caiu — só pra pedidos que vieram de lá (import dinâmico evita ciclo payments↔whatsapp). */
+async function notifyPaymentApproved(
+  tenantId: string,
+  order: { id: string; number: number; customer: { phone: string } },
+) {
+  const { getWhatsAppSenderFor } = await import("../whatsapp/transport.js");
+  const sender = await getWhatsAppSenderFor(tenantId);
+  if (!sender) return;
+
+  const text = `✅ *Pagamento do pedido #${order.number} confirmado!*\nJá entrou pra produção. 🍔`;
+  await sender.sendText(order.customer.phone, text);
+  const { recordOutboundMessage } = await import("../whatsapp/messages.service.js");
+  await recordOutboundMessage(tenantId, order.customer.phone, text, { senderType: "SYSTEM" });
 }
 
 /** Consulta e sincroniza o status (usado pelo polling do cardápio). */
