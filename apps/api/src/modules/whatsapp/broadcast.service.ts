@@ -22,6 +22,13 @@ export interface BroadcastRecipient {
   name: string;
   wrote: string;
   refusedAt: string;
+  /** Itens do último pedido, em texto limpo pro cliente ler (ex.: "1x Combo 3 X-Tudo + Guaraná 1L") — só existe pra audience "buyers". */
+  lastItems?: string;
+}
+
+/** Troca {nome} e {ultimo_pedido} pelos dados DESTE cliente — cada um recebe o próprio último pedido, não um texto genérico igual pra todo mundo. */
+function applyTemplate(text: string, recipient: BroadcastRecipient): string {
+  return text.replace(/\{nome\}/gi, recipient.name || "").replace(/\{ultimo_pedido\}/gi, recipient.lastItems ?? "");
 }
 
 export type BroadcastAudience = "refused" | "buyers";
@@ -46,7 +53,13 @@ async function computePastBuyers(tenantId: string): Promise<BroadcastRecipient[]
     if (o.createdAt.getTime() > cutoff) continue;
     const days = Math.round((Date.now() - o.createdAt.getTime()) / 86_400_000);
     const items = o.items.map((i) => `${i.quantity}x ${i.nameSnapshot}`).join(", ");
-    result.push({ phone: phone.length <= 11 ? `55${phone}` : phone, name: o.customer?.name ?? "", wrote: `Último pedido há ${days} dia(s): ${items} (R$ ${(o.totalCents / 100).toFixed(0)})`, refusedAt: o.createdAt.toISOString() });
+    result.push({
+      phone: phone.length <= 11 ? `55${phone}` : phone,
+      name: o.customer?.name ?? "",
+      wrote: `Último pedido há ${days} dia(s): ${items} (R$ ${(o.totalCents / 100).toFixed(0)})`,
+      refusedAt: o.createdAt.toISOString(),
+      lastItems: items,
+    });
   }
   return result;
 }
@@ -93,18 +106,20 @@ export async function computeBroadcastRecipients(tenantId: string, audience: Bro
 
 export async function sendBroadcastMessage(tenantId: string, phone: string, text: string, audience: BroadcastAudience = "refused"): Promise<{ status: "sent" | "skipped"; reason?: string }> {
   const recipients = await computeBroadcastRecipients(tenantId, audience);
-  if (!recipients.some((r) => r.phone === phone)) {
+  const recipient = recipients.find((r) => r.phone === phone);
+  if (!recipient) {
     throw new AppError(400, "Esse número não está na lista do disparo.");
   }
+  const personalizedText = applyTemplate(text, recipient);
   const already = await prisma.whatsAppMessage.findFirst({
-    where: { tenantId, phone, senderType: "BOT", body: text, createdAt: { gte: new Date(Date.now() - DEDUPE_MS) } },
+    where: { tenantId, phone, senderType: "BOT", body: personalizedText, createdAt: { gte: new Date(Date.now() - DEDUPE_MS) } },
     select: { id: true },
   });
   if (already) return { status: "skipped", reason: "já recebeu essa mensagem nas últimas 24h" };
 
   const sender = await getWhatsAppSenderFor(tenantId);
   if (!sender) throw new AppError(409, "Conecte o WhatsApp antes de fazer o disparo.");
-  await sender.sendText(phone, text);
-  await recordOutboundMessage(tenantId, phone, text, { senderType: "BOT" });
+  await sender.sendText(phone, personalizedText);
+  await recordOutboundMessage(tenantId, phone, personalizedText, { senderType: "BOT" });
   return { status: "sent" };
 }

@@ -7,6 +7,7 @@ interface Recipient {
   name: string;
   wrote: string;
   refusedAt: string;
+  lastItems?: string;
 }
 
 type Audience = "refused" | "buyers";
@@ -14,7 +15,7 @@ const DEFAULT_TEXTS: Record<Audience, string> = {
   refused:
     "Oi! Boa notícia: a Casa 63 Hamburgueria agora já entrega na sua região! 🛵🍔 Se quiser pedir, é só responder aqui com o que você quer que eu monto seu pedido.",
   buyers:
-    "Oi! Aqui é da Casa 63 Hamburgueria 🍔 Sentimos sua falta! Hoje estamos abertos até às 23:30 com o combo de 2 X-Tudo + refri 1L por R$50. Quer que eu já monte o seu? É só responder aqui!",
+    "Oi! Aqui é da Casa 63 Hamburgueria 🍔 Sentimos sua falta! Bora repetir o seu *{ultimo_pedido}*? É só responder aqui que eu já separo pra você! 🍔",
 };
 const MIN_GAP_S = 25;
 const MAX_GAP_S = 55;
@@ -130,6 +131,11 @@ export function BroadcastCard() {
             onChange={(e) => setText(e.target.value)}
             disabled={running}
           />
+          {audience === "buyers" && (
+            <p className="text-xs text-surface-500">
+              Use <code>{"{ultimo_pedido}"}</code> e <code>{"{nome}"}</code> no texto — cada cliente recebe com os próprios dados no lugar, em vez do mesmo texto pra todo mundo.
+            </p>
+          )}
           <div className="max-h-72 space-y-1 overflow-y-auto rounded-xl border border-surface-200 p-2">
             {recipients.length === 0 && <p className="p-2 text-xs text-surface-500">Ninguém na lista.</p>}
             {recipients.map((r) => (

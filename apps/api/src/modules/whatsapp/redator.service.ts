@@ -63,7 +63,9 @@ Escreva agora a mensagem pro cliente.`;
   const response = await getAnthropicClient().messages.create(
     {
       model: AI_MODEL_SONNET,
-      max_tokens: 300,
+      // 300 cortava resumo de pedido no meio da frase (pego testando ao vivo:
+      // "Pagamento: Pix na entr" truncado) — resumo com vários itens precisa de mais espaço.
+      max_tokens: 600,
       system: [{ type: "text", text: PERSONA_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: userText }],
     },

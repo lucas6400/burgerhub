@@ -251,6 +251,7 @@ function buildStaticSystemBlock(
   hours: string,
   storeAddress: string,
   generalDeliveryInfo: string,
+  acceptsDineIn: boolean,
 ): string {
   return `Você é a atendente virtual da hamburgueria "${tenantName}" no WhatsApp. Conduza a conversa inteira do pedido em português do Brasil, de forma natural e calorosa, sem menu numerado — o cliente fala o que quer como falaria com um atendente de verdade.
 
@@ -261,6 +262,8 @@ HORÁRIOS:
 ${hours}
 
 ENDEREÇO DA LOJA: ${storeAddress}
+
+CONSUMO NO LOCAL: ${acceptsDineIn ? "a loja TEM mesas e aceita cliente comer no local, além de entrega e retirada." : "a loja NÃO tem estrutura pra comer no local — só entrega e retirada para viagem."} Se o cliente perguntar algo como "dá pra comer aí?", "tem mesa?" ou "como funciona pra consumir no local", responda com esse dado (nunca invente nem ignore a pergunta). Se aceitar e ele quiser vir comer lá, chame send_store_location e diga o endereço.
 
 INFORMAÇÃO GERAL DE ENTREGA (use pra responder perguntas genéricas tipo "a entrega é grátis?" SEM bairro citado — pra bairro específico, sempre use a ferramenta check_delivery_area em vez desse texto): ${generalDeliveryInfo}
 
@@ -695,6 +698,7 @@ export async function handleAiConversation(
       botAutoPixEnabled: boolean;
       isOpenOverride: boolean | null;
       aiPipelineV2Enabled: boolean;
+      acceptsDineIn: boolean;
     };
     businessHours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
   },
@@ -1089,7 +1093,7 @@ export async function handleAiConversation(
   const system: Anthropic.Beta.Messages.BetaTextBlockParam[] = [
     {
       type: "text",
-      text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo),
+      text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo, tenant.settings.acceptsDineIn),
       cache_control: { type: "ephemeral" },
     },
     { type: "text", text: dynamicStateText + staffContext + v2ExecutorNote },
