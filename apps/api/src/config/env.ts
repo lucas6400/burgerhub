@@ -57,6 +57,10 @@ export const env = {
   // padrão (sem IA) — nunca trava o pedido por falta de chave.
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY ?? "",
+    // Configurável por env var pra trocar de modelo sem deploy de código; o valor
+    // default é o que já estava hardcoded nos 3 arquivos que chamam a Anthropic.
+    modelHaiku: process.env.ANTHROPIC_MODEL_HAIKU ?? "claude-haiku-4-5",
+    modelSonnet: process.env.ANTHROPIC_MODEL_SONNET ?? "claude-sonnet-5",
   },
   // Transcrição de áudio do WhatsApp (Google Gemini). Sem GEMINI_API_KEY o bot só avisa que não ouve áudio.
   gemini: {

@@ -58,6 +58,27 @@ model Tenant {
   drivers         Driver[]
   deliveries      Delivery[]
   pushSubscriptions PushSubscription[]
+  aiUsageLogs     AiUsageLog[]
+}
+
+// Registro de consumo real da API da Anthropic (tokens + custo estimado), gravado no
+// momento de cada chamada — existia só estimativa de custo até aqui, sem medição nenhuma.
+model AiUsageLog {
+  id                       String   @id @default(cuid())
+  tenantId                 String
+  tenant                   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // "conversation_executor" | "conversation_redator" | "intent" | "receipt_vision"
+  purpose                  String
+  model                    String
+  inputTokens              Int
+  outputTokens             Int
+  cacheCreationInputTokens Int      @default(0)
+  cacheReadInputTokens     Int      @default(0)
+  // Calculado com a tabela de preço vigente NO MOMENTO da chamada — nunca recalculado depois.
+  estimatedCostCents       Int
+  createdAt                DateTime @default(now())
+
+  @@index([tenantId, createdAt])
 }
 
 model TenantSettings {
@@ -113,6 +134,10 @@ model TenantSettings {
   // reconhecer produto/área de entrega nos pontos de entrada. Desligado por
   // padrão — liga/desliga por estabelecimento nas Configurações.
   aiConversationEnabled Boolean @default(false)
+  // Pipeline em 2 chamadas (Executor decide por ferramentas + Redator escreve a
+  // resposta final, grounded no que o Executor decidiu) em vez de uma só IA fazendo
+  // as duas coisas — desligado por padrão, só liga depois de validar em tenant de teste.
+  aiPipelineV2Enabled Boolean @default(false)
   // API oficial da Meta (Cloud API) — alternativa ao Evolution/QR acima, cada
   // tenant conecta o PRÓPRIO número via Embedded Signup (sem QR code). Até a
   // BurgerHub ter o App/Business verificados na Meta, waProvider fica sempre

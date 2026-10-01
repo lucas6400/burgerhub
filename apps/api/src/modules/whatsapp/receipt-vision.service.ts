@@ -1,7 +1,9 @@
-import { Anthropic } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import * as z from "zod/v4";
 import { env } from "../../config/env.js";
+import { getAnthropicClient, AI_MODEL_SONNET } from "../ai/anthropic-client.js";
+import { logAiUsage } from "../ai/usage-log.js";
+import { background } from "../../lib/background.js";
 
 /**
  * Só extrai o que está escrito na imagem — nunca decide se o pagamento é
@@ -10,7 +12,7 @@ import { env } from "../../config/env.js";
  * em ai-intent.service.ts (nunca confiar em "julgamento" da IA sobre fatos).
  */
 
-const MODEL = "claude-sonnet-5";
+const MODEL = AI_MODEL_SONNET;
 const CALL_TIMEOUT_MS = 15_000; // leitura de imagem é mais lenta que classificação de texto
 
 const ReceiptSchema = z.object({
@@ -49,12 +51,6 @@ export interface ExtractedReceipt {
   amountCents: number | null;
 }
 
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!client) client = new Anthropic({ apiKey: env.anthropic.apiKey });
-  return client;
-}
-
 const SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 type SupportedMediaType = (typeof SUPPORTED_MEDIA_TYPES)[number];
 
@@ -66,11 +62,11 @@ function normalizeMediaType(mimetype: string): SupportedMediaType {
 }
 
 /** Nunca lança exceção — qualquer falha (sem chave, timeout, erro de API) cai em `null`, e quem chama trata como "não consegui ler". */
-export async function extractReceiptData(imageBase64: string, mimetype: string): Promise<ExtractedReceipt | null> {
+export async function extractReceiptData(tenantId: string, imageBase64: string, mimetype: string): Promise<ExtractedReceipt | null> {
   if (!env.anthropic.apiKey) return null;
 
   try {
-    const response = await getClient().messages.parse(
+    const response = await getAnthropicClient().messages.parse(
       {
         model: MODEL,
         max_tokens: 300,
@@ -90,6 +86,15 @@ export async function extractReceiptData(imageBase64: string, mimetype: string):
         output_config: { format: zodOutputFormat(ReceiptSchema) },
       },
       { timeout: CALL_TIMEOUT_MS, maxRetries: 1 },
+    );
+
+    background(
+      logAiUsage(tenantId, "receipt_vision", MODEL, {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        cacheCreationInputTokens: response.usage.cache_creation_input_tokens ?? undefined,
+        cacheReadInputTokens: response.usage.cache_read_input_tokens ?? undefined,
+      }),
     );
 
     return response.parsed_output ?? null;

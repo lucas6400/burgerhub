@@ -1,12 +1,14 @@
-import { Anthropic } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import * as z from "zod/v4";
 import { prisma } from "../../lib/prisma.js";
 import { env } from "../../config/env.js";
 import { allowAiCall } from "./ai-throttle.js";
 import { answerDeliveryAreaQuery, answerGeneralDeliveryQuestion, answerStoreAddressQuestion } from "./delivery-query.helper.js";
+import { getAnthropicClient, AI_MODEL_SONNET } from "../ai/anthropic-client.js";
+import { logAiUsage } from "../ai/usage-log.js";
+import { background } from "../../lib/background.js";
 
-const MODEL = "claude-sonnet-5";
+const MODEL = AI_MODEL_SONNET;
 const CALL_TIMEOUT_MS = 4_000;
 
 const brl = (cents: number) => (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -69,12 +71,6 @@ Regras importantes:
 - Se nenhuma das três intenções for identificada com confiança, todos os campos de intenção devem ser null.
 - "replyText" só é usado no caso 1 (produto) — nos outros casos, deixe como string vazia. Quando usado: texto simples (sem markdown, sem links, sem inventar preço fora da lista fornecida), 1-2 frases, em português do Brasil, tom caloroso e natural de atendimento de hamburgueria.`;
 
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!client) client = new Anthropic({ apiKey: env.anthropic.apiKey });
-  return client;
-}
-
 async function getLeanCatalog(tenantId: string): Promise<{ code: string; name: string; priceCents: number }[]> {
   const products = await prisma.product.findMany({
     where: { tenantId, available: true, internalCode: { not: null } },
@@ -129,7 +125,7 @@ export async function recognizeCustomerIntent(
     : "";
 
   try {
-    const response = await getClient().messages.parse(
+    const response = await getAnthropicClient().messages.parse(
       {
         model: MODEL,
         max_tokens: 300,
@@ -160,6 +156,15 @@ export async function recognizeCustomerIntent(
         output_config: { format: zodOutputFormat(IntentSchema) },
       },
       { timeout: CALL_TIMEOUT_MS, maxRetries: 1 },
+    );
+
+    background(
+      logAiUsage(tenantId, "intent", MODEL, {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        cacheCreationInputTokens: response.usage.cache_creation_input_tokens ?? undefined,
+        cacheReadInputTokens: response.usage.cache_read_input_tokens ?? undefined,
+      }),
     );
 
     const parsed = response.parsed_output;

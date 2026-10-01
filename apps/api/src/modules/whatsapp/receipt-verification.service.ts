@@ -76,7 +76,7 @@ export async function handleReceiptImage(
 
   const instance = instanceNameFor(tenantId);
   const imageBase64 = await waTransport.downloadImage(instance, image);
-  const extracted = imageBase64 ? await extractReceiptData(imageBase64, image.mimetype ?? "image/jpeg") : null;
+  const extracted = imageBase64 ? await extractReceiptData(tenantId, imageBase64, image.mimetype ?? "image/jpeg") : null;
 
   const mismatchReasons: string[] = [];
   if (!extracted || !extracted.legible) {

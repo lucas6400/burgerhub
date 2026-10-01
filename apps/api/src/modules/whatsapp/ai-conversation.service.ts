@@ -14,6 +14,10 @@ import { moveLead } from "./labels.service.js";
 import { recordOutboundMessage } from "./messages.service.js";
 import { getWhatsAppSenderFor, instanceNameFor, waTransport, type WaRawImageMessage } from "./transport.js";
 import { isStoreOpenNow, nowInStoreTimezone } from "../../utils/storeTime.js";
+import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET } from "../ai/anthropic-client.js";
+import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
+import type { TokenUsage } from "../ai/pricing.js";
+import { composeReply } from "./redator.service.js";
 
 /**
  * Modo beta: a IA conduz a conversa inteira do pedido (sem menu numerado),
@@ -22,7 +26,7 @@ import { isStoreOpenNow, nowInStoreTimezone } from "../../utils/storeTime.js";
  * carrinho) precisa ser persistido e recarregado do banco a cada mensagem.
  */
 
-const MODEL = "claude-haiku-4-5";
+const MODEL = AI_MODEL_HAIKU;
 const MAX_ITERATIONS = 8;
 const MAX_HISTORY_TURNS = 8;
 const MAX_HISTORY_BYTES = 40_000;
@@ -80,10 +84,30 @@ function formatAddress(address: OrderDraft["address"]): string {
   return [address.street, address.number].filter(Boolean).join(", ") + ` - ${[address.neighborhood, address.city].filter(Boolean).join(", ")}`;
 }
 
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!client) client = new Anthropic({ apiKey: env.anthropic.apiKey });
-  return client;
+function emptyUsage(): TokenUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+}
+
+/**
+ * O Tool Runner pode disparar várias chamadas à API numa única invocação (uma por
+ * iteração de ferramenta) — `await runner` sozinho só devolve a mensagem da ÚLTIMA
+ * chamada, perdendo o consumo das intermediárias. Itera manualmente pra somar o
+ * `usage` de toda chamada que aconteceu neste turno, mantendo o mesmo resultado
+ * final de antes (`await runner` depois do loop devolve a mesma `finalMessage`).
+ */
+async function consumeRunner(
+  runner: AsyncIterable<Anthropic.Beta.Messages.BetaMessage> & PromiseLike<Anthropic.Beta.Messages.BetaMessage>,
+): Promise<{ finalMessage: Anthropic.Beta.Messages.BetaMessage; usage: TokenUsage }> {
+  const usage = emptyUsage();
+  for await (const item of runner) {
+    const message = await (item as unknown as Promise<Anthropic.Beta.Messages.BetaMessage> | Anthropic.Beta.Messages.BetaMessage);
+    usage.inputTokens += message.usage.input_tokens;
+    usage.outputTokens += message.usage.output_tokens;
+    usage.cacheCreationInputTokens = (usage.cacheCreationInputTokens ?? 0) + (message.usage.cache_creation_input_tokens ?? 0);
+    usage.cacheReadInputTokens = (usage.cacheReadInputTokens ?? 0) + (message.usage.cache_read_input_tokens ?? 0);
+  }
+  const finalMessage = await runner;
+  return { finalMessage, usage };
 }
 
 /** Corta o histórico salvo pelos últimos N turnos, sempre numa fronteira de mensagem de texto do cliente — nunca no meio de um par tool_use/tool_result, que invalidaria o replay pra API. */
@@ -105,6 +129,49 @@ function truncateHistory(history: Anthropic.Beta.Messages.BetaMessageParam[]): A
     truncated = truncated.slice(nextBoundary);
   }
   return truncated;
+}
+
+function stripCacheControl(block: Anthropic.Beta.Messages.BetaContentBlockParam): Anthropic.Beta.Messages.BetaContentBlockParam {
+  if (!("cache_control" in block) || !block.cache_control) return block;
+  const { cache_control: _drop, ...rest } = block;
+  return rest as Anthropic.Beta.Messages.BetaContentBlockParam;
+}
+
+/**
+ * Marca o último bloco da última mensagem do histórico como ponto de corte de cache
+ * (`cache_control`). Como a conversa só cresce por append, o prefixo comum entre o
+ * turno anterior e este (system + histórico salvo) passa a ser reaproveitado do cache
+ * da Anthropic em vez de recobrado por inteiro a cada mensagem nova do cliente — só o
+ * bloco estático (`buildStaticSystemBlock`) tinha esse marcador até aqui.
+ *
+ * O histórico salvo no banco é literalmente `runner.params.messages` de um turno
+ * anterior (ver `savedMessages` mais abaixo) — ou seja, já pode conter o marcador
+ * colocado NESTE turno anterior. Sem remover o marcador velho antes de adicionar um
+ * novo, cada turno empilha mais um `cache_control` no histórico até estourar o limite
+ * de 4 blocos por requisição da API (bug real, pego testando o fluxo completo num
+ * tenant de teste). Por isso sempre limpa tudo antes de marcar só o bloco atual.
+ */
+function markCacheBreakpoint(history: Anthropic.Beta.Messages.BetaMessageParam[]): Anthropic.Beta.Messages.BetaMessageParam[] {
+  if (history.length === 0) return history;
+  const cleaned = history.map((m) => ({
+    ...m,
+    content: typeof m.content === "string" ? m.content : m.content.map(stripCacheControl),
+  }));
+  const lastIdx = cleaned.length - 1;
+  const last = cleaned[lastIdx];
+  const blocks = typeof last.content === "string" ? [{ type: "text" as const, text: last.content }] : [...last.content];
+  if (blocks.length === 0) return cleaned;
+  const lastBlockIdx = blocks.length - 1;
+  const lastBlock = blocks[lastBlockIdx];
+  // Só os tipos de bloco que de fato aparecem nesta conversa (texto, uso/resultado de
+  // ferramenta, imagem) aceitam cache_control sem ambiguidade de tipo — qualquer outro
+  // tipo (thinking, fallback etc., que não ocorrem aqui) deixa de cachear este turno
+  // em vez de arriscar quebrar a chamada inteira.
+  const CACHEABLE_TYPES = new Set(["text", "tool_use", "tool_result", "image"]);
+  if (!CACHEABLE_TYPES.has(lastBlock.type)) return cleaned;
+  blocks[lastBlockIdx] = { ...lastBlock, cache_control: { type: "ephemeral" } } as Anthropic.Beta.Messages.BetaContentBlockParam;
+  cleaned[lastIdx] = { ...last, content: blocks };
+  return cleaned;
 }
 
 async function getCatalogText(tenantId: string): Promise<string> {
@@ -627,6 +694,7 @@ export async function handleAiConversation(
       mpAccessToken: string | null;
       botAutoPixEnabled: boolean;
       isOpenOverride: boolean | null;
+      aiPipelineV2Enabled: boolean;
     };
     businessHours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
   },
@@ -1008,13 +1076,23 @@ export async function handleAiConversation(
   const staffContext = staffMsgs.length
     ? `\n\nA EQUIPE (atendente humano) falou com este cliente há pouco — contexto do que foi combinado, respeite e NÃO contradiga (mais recente primeiro): ${staffMsgs.map((m) => `"${m.body.replace(/\n/g, " ").slice(0, 160)}"`).join(" | ")}`
     : "";
+  // Pipeline V2 (atrás de flag por tenant): o Executor abaixo só decide por ferramentas
+  // e escreve uma anotação interna — quem escreve a resposta de verdade é o Redator
+  // (redator.service.ts, Sonnet), depois que o Executor terminar. Regras de negócio
+  // (buildStaticSystemBlock) continuam IDÊNTICAS nos dois modos; só o bloco dinâmico
+  // ganha essa instrução extra quando V2 está ligado.
+  const pipelineV2 = tenant.settings.aiPipelineV2Enabled === true;
+  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText);
+  const v2ExecutorNote = pipelineV2
+    ? "\n\nMODO INTERNO: não escreva a mensagem final para o cliente. Depois de chamar as ferramentas necessárias, escreva só uma ANOTAÇÃO INTERNA curta (1-2 frases, pode ser telegráfica) resumindo o que foi decidido/adicionado e o que falta perguntar — esse texto nunca chega ao cliente, só alimenta quem escreve a resposta de verdade."
+    : "";
   const system: Anthropic.Beta.Messages.BetaTextBlockParam[] = [
     {
       type: "text",
       text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo),
       cache_control: { type: "ephemeral" },
     },
-    { type: "text", text: buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText) + staffContext },
+    { type: "text", text: dynamicStateText + staffContext + v2ExecutorNote },
   ];
 
   // Imagem: baixa do WhatsApp e manda pro modelo junto com a legenda. Sem conseguir
@@ -1033,31 +1111,33 @@ export async function handleAiConversation(
   }
 
   const startRunner = (history: Anthropic.Beta.Messages.BetaMessageParam[]) =>
-    getClient().beta.messages.toolRunner({
+    getAnthropicClient().beta.messages.toolRunner({
       model: MODEL,
       max_tokens: 500,
       max_iterations: MAX_ITERATIONS,
       system,
       tools,
-      messages: [...history, { role: "user", content: userContent }],
+      messages: [...markCacheBreakpoint(history), { role: "user", content: userContent }],
     });
 
   let runner = startRunner(data.history);
   let finalMessage: Anthropic.Beta.Messages.BetaMessage;
+  let turnUsage = emptyUsage();
   try {
-    finalMessage = await runner;
+    ({ finalMessage, usage: turnUsage } = await consumeRunner(runner));
   } catch (err) {
     console.error("[ai-conversation] falha ao processar conversa, tentando de novo sem o histórico:", err);
     // Um histórico salvo com problema derrubava toda resposta seguinte: tenta uma
     // vez só com a mensagem atual (o rascunho e os pedidos vão no bloco dinâmico).
     try {
       runner = startRunner([]);
-      finalMessage = await runner;
+      ({ finalMessage, usage: turnUsage } = await consumeRunner(runner));
     } catch (err2) {
       console.error("[ai-conversation] falha também sem histórico:", err2);
       return ["Desculpa, tive um problema aqui. Pode repetir sua mensagem? 🙏"];
     }
   }
+  background(logAiUsage(tenantId, "conversation_executor" satisfies AiUsagePurpose, MODEL, turnUsage));
 
   // O código do Pix sai como mensagem própria, controlado por código — nunca
   // confiando que a IA vá de fato separar o texto sozinha (nem sempre separa).
@@ -1090,9 +1170,29 @@ export async function handleAiConversation(
   });
 
   const texts = finalMessage.content.filter((b): b is Anthropic.Beta.Messages.BetaTextBlock => b.type === "text").map((b) => b.text.trim()).filter(Boolean);
-  // Sem texto da IA (só chamou ferramentas): em vez do "só um instante" que deixava o
-  // cliente esperando calado, faz a pergunta que falta pelo estado do pedido.
-  let replies = texts.length > 0 ? texts : [nextStepPrompt(draft)];
+
+  let replies: string[];
+  if (pipelineV2) {
+    // Nunca enviar a anotação interna do Executor ao cliente — ela só alimenta o Redator.
+    const internalNote = texts.join(" ").trim() || "(sem observação do executor; decida a próxima pergunta pelo estado do pedido)";
+    const recentCustomerMessages = data.history
+      .filter((m) => m.role === "user" && typeof m.content === "string")
+      .slice(-3)
+      .map((m) => m.content as string)
+      .join("\n");
+    try {
+      const composed = await composeReply({ tenantName: tenant.name, stateText: dynamicStateText, internalNote, recentCustomerMessages });
+      replies = composed.replies.length > 0 ? composed.replies : [nextStepPrompt(draft)];
+      background(logAiUsage(tenantId, "conversation_redator" satisfies AiUsagePurpose, AI_MODEL_SONNET, composed.usage));
+    } catch (err) {
+      console.error("[ai-conversation] Redator falhou, caindo pra resposta determinística:", err);
+      replies = [nextStepPrompt(draft)];
+    }
+  } else {
+    // Sem texto da IA (só chamou ferramentas): em vez do "só um instante" que deixava o
+    // cliente esperando calado, faz a pergunta que falta pelo estado do pedido.
+    replies = texts.length > 0 ? texts : [nextStepPrompt(draft)];
+  }
 
   // Primeira resposta a quem já chegou com um item na mão (clique de anúncio): o modelo
   // costuma responder só "entrega ou retirada?" — troca pelo texto que já convida à
