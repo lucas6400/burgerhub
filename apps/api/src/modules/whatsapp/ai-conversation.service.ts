@@ -758,7 +758,7 @@ export async function handleAiConversation(
     };
     businessHours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
   },
-  session: { id: string; data: string },
+  session: { id: string; data: string; updatedAt?: Date },
   location?: { lat: number; lng: number },
   image?: WaRawImageMessage,
 ): Promise<string[]> {
@@ -1146,7 +1146,14 @@ export async function handleAiConversation(
   // Pedir pro Executor escrever "só uma anotação interna" foi testado e não funciona: o prompt
   // fixo dele manda escrever a resposta ao cliente e o Haiku ignorava a instrução extra.
   const pipelineV2 = tenant.settings.aiPipelineV2Enabled === true;
-  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText);
+  // Cliente que volta horas depois com o carrinho ainda aberto (a conversa só reinicia após 8h nesse caso):
+  // sem este aviso a IA tratava o carrinho antigo como pedido em andamento de agora.
+  const idleHours = session.updatedAt ? (Date.now() - session.updatedAt.getTime()) / 3_600_000 : 0;
+  const resumeNote =
+    idleHours >= 2 && draft.cart.length > 0
+      ? `\n\nO cliente ficou cerca de ${Math.round(idleHours)}h sem responder e voltou agora; o carrinho acima é de antes. Se a mensagem dele deixar claro que continua esse pedido (ex.: "sim" à pergunta da equipe ou sua, "pode seguir"), siga normalmente de onde parou. Se for vaga ou falar de outra coisa, confirme em UMA frase se ele ainda quer esse pedido antes de avançar.`
+      : "";
+  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText) + resumeNote;
   const system: Anthropic.Beta.Messages.BetaTextBlockParam[] = [
     {
       type: "text",

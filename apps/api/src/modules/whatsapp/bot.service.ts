@@ -34,6 +34,18 @@ interface SessionData {
 }
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2h de inatividade reinicia a conversa
+// Modo IA com carrinho aberto: o cliente costuma voltar horas depois ("Sim" à pergunta da equipe
+// "podemos seguir com o seu pedido?") — reiniciar aos 2h jogava o pedido fora e o bot recomeçava do zero.
+const AI_OPEN_CART_TTL_MS = 8 * 60 * 60 * 1000;
+
+function hasOpenCart(sessionData: string): boolean {
+  try {
+    const draft = JSON.parse(sessionData)?.draft;
+    return Array.isArray(draft?.cart) && draft.cart.length > 0 && !draft.finalizedOrderId;
+  } catch {
+    return false;
+  }
+}
 
 const brl = (cents: number) =>
   (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -125,7 +137,8 @@ export async function handleIncoming(
   // Modo beta: IA conduz a conversa inteira, sem o menu numerado abaixo — o
   // resto desta função fica intocado pra quem não ativou o interruptor.
   if (tenant.settings.aiConversationEnabled) {
-    const expiredAi = session && Date.now() - session.updatedAt.getTime() > SESSION_TTL_MS;
+    const idleMs = session ? Date.now() - session.updatedAt.getTime() : 0;
+    const expiredAi = session && idleMs > SESSION_TTL_MS && !(idleMs <= AI_OPEN_CART_TTL_MS && hasOpenCart(session.data));
     if (!session || expiredAi) {
       session = await prisma.chatSession.upsert({
         where: { tenantId_phone: { tenantId, phone } },
