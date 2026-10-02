@@ -174,6 +174,37 @@ function markCacheBreakpoint(history: Anthropic.Beta.Messages.BetaMessageParam[]
   return cleaned;
 }
 
+/** Ferramentas que de fato rodaram NESTE turno (depois da última mensagem real do cliente) — o Redator só pode afirmar que algo foi feito se aparecer aqui. */
+function extractTurnActions(messages: Anthropic.Beta.Messages.BetaMessageParam[]): string[] {
+  const isCustomerTurn = (m: Anthropic.Beta.Messages.BetaMessageParam) =>
+    m.role === "user" && (typeof m.content === "string" || m.content.some((b) => b.type !== "tool_result"));
+  let start = -1;
+  messages.forEach((m, i) => {
+    if (isCustomerTurn(m)) start = i;
+  });
+  const turn = messages.slice(start + 1);
+  // Resultado de cada ferramenta (ex.: número do pedido, tempo estimado): são fatos confirmados que o Redator pode usar.
+  const results = new Map<string, string>();
+  for (const m of turn) {
+    if (m.role !== "user" || typeof m.content === "string") continue;
+    for (const b of m.content) {
+      if (b.type !== "tool_result") continue;
+      const text = typeof b.content === "string" ? b.content : (b.content ?? []).map((c) => (c.type === "text" ? c.text : "")).join(" ");
+      results.set(b.tool_use_id, text.replace(/\s+/g, " ").trim().slice(0, 400));
+    }
+  }
+  const actions: string[] = [];
+  for (const m of turn) {
+    if (m.role !== "assistant" || typeof m.content === "string") continue;
+    for (const b of m.content) {
+      if (b.type !== "tool_use") continue;
+      const result = results.get(b.id);
+      actions.push(`${b.name} ${JSON.stringify(b.input).slice(0, 220)}${result ? ` → resultado: ${result}` : ""}`);
+    }
+  }
+  return actions;
+}
+
 async function getCatalogText(tenantId: string): Promise<string> {
   const categories = await prisma.category.findMany({
     where: { tenantId, active: true },
@@ -186,7 +217,10 @@ async function getCatalogText(tenantId: string): Promise<string> {
       const items = c.products
         .map((p) => {
           const price = p.promoPriceCents ?? p.priceCents;
-          const desc = p.description ? ` — ${p.description}` : "";
+          // Descrição cadastrada com uma linha por ingrediente quebrava o "um produto por linha" do
+          // cardápio e a IA misturava ingredientes de lanches parecidos (X - Tudo com X Casa 63).
+          const oneLine = p.description?.replace(/\s*\n\s*/g, " ").replace(/[\s,.]+$/, "").trim();
+          const desc = oneLine ? ` — ${oneLine}` : "";
           return `  id="${p.id}" | ${p.name} | ${brl(price)}${desc}`;
         })
         .join("\n");
@@ -263,7 +297,7 @@ ${hours}
 
 ENDEREÇO DA LOJA: ${storeAddress}
 
-CONSUMO NO LOCAL: ${acceptsDineIn ? "a loja TEM mesas e aceita cliente comer no local, além de entrega e retirada." : "a loja NÃO tem estrutura pra comer no local — só entrega e retirada para viagem."} Se o cliente perguntar algo como "dá pra comer aí?", "tem mesa?" ou "como funciona pra consumir no local", responda com esse dado (nunca invente nem ignore a pergunta). Se aceitar e ele quiser vir comer lá, chame send_store_location e diga o endereço.
+CONSUMO NO LOCAL: ${acceptsDineIn ? "a loja TEM mesas e aceita cliente comer no local, além de entrega e retirada." : "a loja NÃO tem estrutura pra comer no local — só entrega e retirada para viagem."} Se o cliente perguntar algo como "dá pra comer aí?", "tem mesa?" ou "como funciona pra consumir no local", responda com esse dado (nunca invente nem ignore a pergunta). Se aceitar e ele quiser vir comer lá, chame send_store_location e diga o endereço. Só fale de consumo no local quando o cliente perguntar: NUNCA mencione em saudações, nem como opção na pergunta "entrega ou retirada" (o pedido só tem entrega ou retirada).
 
 INFORMAÇÃO GERAL DE ENTREGA (use pra responder perguntas genéricas tipo "a entrega é grátis?" SEM bairro citado — pra bairro específico, sempre use a ferramenta check_delivery_area em vez desse texto): ${generalDeliveryInfo}
 
@@ -308,7 +342,10 @@ Regras importantes:
 - ONDE FICAMOS: quando o cliente perguntar onde a loja fica / endereço / como chegar, chame send_store_location (envia o pino do mapa) e escreva só uma frase curta com o endereço.
 - ALTERAÇÃO DE PEDIDO EM ANDAMENTO (tirar ingrediente, alergia, trocar item): chame request_order_change com a alteração COMPLETA, e chame DE NOVO sempre que o cliente acrescentar/esclarecer algo. NUNCA diga que a equipe "está ciente" ou que "avisou" sem ter chamado a ferramenta NESTA resposta. Se for alergia, trate como urgente e peça só o que falta (qual item), uma pergunta por vez.
 - Se o cliente tem PEDIDO EM ANDAMENTO (veja o estado do pedido), perguntas como "vai demorar?", "cadê meu pedido?" ou "já saiu?" respondem com o status REAL informado lá — nunca invente prazo. Se já passou do tempo estimado, peça desculpa e diga que a equipe está acompanhando a entrega. Nunca passe telefone do entregador: diga que a equipe avisa quando ele chegar.
-- Se o cliente pedir refrigerante/bebida sem especificar marca ou sabor, NÃO pergunte qual marca/sabor ele quer — apenas registre o item do cardápio normalmente. O estoque de marcas varia e quem decide o que vai é a loja no preparo, não o cliente no pedido.`;
+- Se o cliente pedir refrigerante/bebida sem especificar marca ou sabor, NÃO pergunte qual marca/sabor ele quer — apenas registre o item do cardápio normalmente. O estoque de marcas varia e quem decide o que vai é a loja no preparo, não o cliente no pedido.
+- TROCA OU ESCOLHA DE MARCA DE REFRI ("troca o guaraná por coca", "quero coca"): NUNCA confirme, prometa nem negue marca alguma (nem Coca, nem Pepsi, nem Guaraná) — já aconteceu de prometerem Coca e chegar Guaraná. Diga só que a marca depende do estoque do dia e que a loja manda o que tiver, e siga o pedido normalmente. Nunca escreva "consigo trocar", "sem problema" nem "anotei a troca".
+- ITEM FORA DO CARDÁPIO (cremes, sobremesas, lanche kids, qualquer coisa que não esteja na lista acima): diga com educação que não tem no cardápio. NUNCA ofereça como se existisse, nem diga "consigo", "posso pedir pra cozinha" ou "vou adicionar". Se o cliente insistir, diga que vai confirmar com a equipe.
+- Quando o cliente mandar várias mensagens seguidas com mais de uma pergunta, responda TODAS (uma frase curta pra cada), sem esquecer nenhuma. Se ele só pedir pra aguardar ("só um instante"), responda curto e simpático, sem repetir o pedido nem puxar a venda.`;
 }
 
 function replaceLastAssistantText(history: Anthropic.Beta.Messages.BetaMessageParam[], text: string): Anthropic.Beta.Messages.BetaMessageParam[] {
@@ -524,6 +561,25 @@ function neutralizeTone(text: string): string {
     .replace(/🤙/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/ +([!.?])/g, "$1");
+}
+
+/**
+ * Marca de refri nunca é prometida: a loja manda o que tiver no estoque do dia. Já aconteceu de a IA
+ * responder "troco por Coca sem problema" e o pedido chegar com Guaraná (cliente reclamou).
+ * "Guaraná" sozinho NÃO dispara: vem no texto dos anúncios ("combo ... + Guaraná 1L").
+ */
+const SODA_BRAND_RE = /\b(coca(?:[\s-]?cola)?|pepsi|fanta|sprite|guaran[aá]|sukita|dolly)\b/i;
+const SODA_SWAP_REQUEST_RE = /\b(coca(?:[\s-]?cola)?|pepsi|fanta|sprite)\b|(troc|mud|substitu|no lugar|em vez|ao inv[eé]s)[^.?!\n]{0,40}(refri|guaran|bebida)/i;
+const SODA_PROMISE_RE = /prefer[eê]ncia|\btroc(a|ar|amos)\b|registrad|anotei|deixei (anotad|registrad)/i;
+const SODA_SAFE_LINE = "Sobre o refrigerante: a marca depende do estoque do dia e a loja manda o que tiver — não dá pra garantir uma marca específica 😊";
+
+function guardSodaBrand(customerText: string, replies: string[], nextStep: string): string[] {
+  if (!SODA_SWAP_REQUEST_RE.test(customerText)) return replies;
+  const kept = replies
+    .map((r) => r.split(/(?<=[.!?])\s+|\n+/).filter((s) => !SODA_BRAND_RE.test(s) && !SODA_PROMISE_RE.test(s)).join(" ").trim())
+    .filter(Boolean);
+  if (kept.join(" ") === replies.join(" ")) return replies;
+  return [`${SODA_SAFE_LINE}\n\n${kept.length > 0 ? kept.join("\n\n") : nextStep}`];
 }
 
 /** "hoje às 18:30" / "amanhã às 18:30" / "domingo às 18:30" — próxima abertura pelo horário cadastrado. */
@@ -870,7 +926,10 @@ export async function handleAiConversation(
       quantity: z.number().int().min(0).max(50).describe("Quantidade desejada; 0 remove o item."),
       notes: z.string().max(200).nullable().describe("Observação livre do cliente sobre o item (ex.: sem cebola). null se não houver."),
     }),
-    run: async ({ productId, quantity, notes }) => {
+    run: async ({ productId, quantity, notes: rawNotes }) => {
+      // Marca de refri nunca vai pra observação do item (a loja decide pelo estoque) — a IA já
+      // anotou "trocar por Coca" aqui e depois o pedido saiu com outra marca.
+      const notes = rawNotes && SODA_BRAND_RE.test(rawNotes) ? null : rawNotes;
       const product = await prisma.product.findFirst({ where: { id: productId, tenantId, available: true } });
       if (!product) throw new Error("Esse item não está disponível no cardápio.");
       const price = product.promoPriceCents ?? product.priceCents;
@@ -1080,23 +1139,21 @@ export async function handleAiConversation(
   const staffContext = staffMsgs.length
     ? `\n\nA EQUIPE (atendente humano) falou com este cliente há pouco — contexto do que foi combinado, respeite e NÃO contradiga (mais recente primeiro): ${staffMsgs.map((m) => `"${m.body.replace(/\n/g, " ").slice(0, 160)}"`).join(" | ")}`
     : "";
-  // Pipeline V2 (atrás de flag por tenant): o Executor abaixo só decide por ferramentas
-  // e escreve uma anotação interna — quem escreve a resposta de verdade é o Redator
-  // (redator.service.ts, Sonnet), depois que o Executor terminar. Regras de negócio
-  // (buildStaticSystemBlock) continuam IDÊNTICAS nos dois modos; só o bloco dinâmico
-  // ganha essa instrução extra quando V2 está ligado.
+  // Pipeline V2 (atrás de flag por tenant): o Executor abaixo funciona IGUAL ao V1 (decide por
+  // ferramentas e escreve um rascunho de resposta). Depois, o Redator (redator.service.ts,
+  // Sonnet, com o cardápio em mãos) confere esse rascunho contra o cardápio e as ações que de
+  // fato rodaram, corrige o que estiver errado e reescreve com cara de atendente humano.
+  // Pedir pro Executor escrever "só uma anotação interna" foi testado e não funciona: o prompt
+  // fixo dele manda escrever a resposta ao cliente e o Haiku ignorava a instrução extra.
   const pipelineV2 = tenant.settings.aiPipelineV2Enabled === true;
   const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText);
-  const v2ExecutorNote = pipelineV2
-    ? "\n\nMODO INTERNO: não escreva a mensagem final para o cliente. Depois de chamar as ferramentas necessárias, escreva só uma ANOTAÇÃO INTERNA curta (1-2 frases, pode ser telegráfica) resumindo o que foi decidido/adicionado e o que falta perguntar — esse texto nunca chega ao cliente, só alimenta quem escreve a resposta de verdade."
-    : "";
   const system: Anthropic.Beta.Messages.BetaTextBlockParam[] = [
     {
       type: "text",
       text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo, tenant.settings.acceptsDineIn),
       cache_control: { type: "ephemeral" },
     },
-    { type: "text", text: dynamicStateText + staffContext + v2ExecutorNote },
+    { type: "text", text: dynamicStateText + staffContext },
   ];
 
   // Imagem: baixa do WhatsApp e manda pro modelo junto com a legenda. Sem conseguir
@@ -1175,27 +1232,37 @@ export async function handleAiConversation(
 
   const texts = finalMessage.content.filter((b): b is Anthropic.Beta.Messages.BetaTextBlock => b.type === "text").map((b) => b.text.trim()).filter(Boolean);
 
-  let replies: string[];
+  // Sem texto da IA (só chamou ferramentas): em vez do "só um instante" que deixava o
+  // cliente esperando calado, faz a pergunta que falta pelo estado do pedido.
+  let replies: string[] = texts.length > 0 ? texts : [nextStepPrompt(draft)];
   if (pipelineV2) {
-    // Nunca enviar a anotação interna do Executor ao cliente — ela só alimenta o Redator.
-    const internalNote = texts.join(" ").trim() || "(sem observação do executor; decida a próxima pergunta pelo estado do pedido)";
-    const recentCustomerMessages = data.history
-      .filter((m) => m.role === "user" && typeof m.content === "string")
-      .slice(-3)
-      .map((m) => m.content as string)
-      .join("\n");
     try {
-      const composed = await composeReply({ tenantName: tenant.name, stateText: dynamicStateText, internalNote, recentCustomerMessages });
-      replies = composed.replies.length > 0 ? composed.replies : [nextStepPrompt(draft)];
+      const composed = await composeReply({
+        tenantName: tenant.name,
+        catalogText: catalog,
+        storeFacts: [
+          `Endereço: ${storeAddress}`,
+          `Horários de funcionamento:\n${hours}`,
+          `Consumo no local: ${tenant.settings.acceptsDineIn ? "SIM, a loja tem mesas e o cliente pode comer lá, além de entrega e retirada" : "NÃO, só entrega e retirada para viagem"}`,
+          `Entrega: ${generalDeliveryInfo}`,
+          "Pagamento (Pix, cartão de crédito/débito e dinheiro): feito na entrega ou na retirada, direto com o entregador ou no balcão. A chave Pix só é enviada se o cliente pedir pra pagar na hora.",
+          "Refrigerante: a marca/sabor depende do estoque do dia; a loja manda o que tiver.",
+        ].join("\n"),
+        stateText: dynamicStateText,
+        draftReply: texts.join("\n\n"),
+        turnActions: extractTurnActions(runner.params.messages as Anthropic.Beta.Messages.BetaMessageParam[]),
+        // Só o que o cliente mandou NESTE turno: passar as últimas mensagens antigas fazia o
+        // Redator responder de novo perguntas que o bot já tinha respondido.
+        customerMessage: text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : ""),
+        previousBotReply: prevAssistantText,
+        isFirstReply: firstTurn,
+      });
+      if (composed.replies.length > 0) replies = composed.replies;
       background(logAiUsage(tenantId, "conversation_redator" satisfies AiUsagePurpose, AI_MODEL_SONNET, composed.usage));
     } catch (err) {
-      console.error("[ai-conversation] Redator falhou, caindo pra resposta determinística:", err);
-      replies = [nextStepPrompt(draft)];
+      // O rascunho do Executor já é uma resposta válida pro cliente — melhor que uma pergunta genérica.
+      console.error("[ai-conversation] Redator falhou, enviando o rascunho do Executor:", err);
     }
-  } else {
-    // Sem texto da IA (só chamou ferramentas): em vez do "só um instante" que deixava o
-    // cliente esperando calado, faz a pergunta que falta pelo estado do pedido.
-    replies = texts.length > 0 ? texts : [nextStepPrompt(draft)];
   }
 
   // Primeira resposta a quem já chegou com um item na mão (clique de anúncio): o modelo
@@ -1351,6 +1418,8 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
     console.error("[ai-conversation] resposta inteira era vazamento de raciocínio — substituída.", { tenantId, phone });
     replies = [nextStepPrompt(draft)];
   }
+
+  replies = guardSodaBrand(text, replies, nextStepPrompt(draft));
 
   return replies.map(neutralizeTone);
 }
