@@ -138,6 +138,9 @@ model TenantSettings {
   // resposta final, grounded no que o Executor decidiu) em vez de uma só IA fazendo
   // as duas coisas — desligado por padrão, só liga depois de validar em tenant de teste.
   aiPipelineV2Enabled Boolean @default(false)
+  // Regras de refrigerante do bot de IA (marcas por tamanho + acréscimo da marca especial no combo —
+  // ver whatsapp/soda-rules.ts). Nulo = regra antiga: o bot nunca promete marca.
+  sodaRules Json?
   // API oficial da Meta (Cloud API) — alternativa ao Evolution/QR acima, cada
   // tenant conecta o PRÓPRIO número via Embedded Signup (sem QR code). Até a
   // BurgerHub ter o App/Business verificados na Meta, waProvider fica sempre

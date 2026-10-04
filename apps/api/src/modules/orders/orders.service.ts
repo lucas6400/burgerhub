@@ -30,6 +30,13 @@ export interface CreateOrderItemInput {
   notes?: string;
   addonIds?: { addonId: string; quantity: number }[];
   removedIngredientIds?: string[]; // ProductIngredient.id
+  /**
+   * Acréscimo por unidade (centavos) e rótulo da variação — SÓ pra chamadores internos de confiança (o bot
+   * de WhatsApp, ex.: Coca no combo). As rotas HTTP descartam esses campos (zod remove chaves desconhecidas),
+   * então nenhum cliente consegue mandar preço.
+   */
+  extraCents?: number;
+  variantLabel?: string;
 }
 
 export interface DeliveryAddressInput {
@@ -215,7 +222,7 @@ export async function createOrder(input: CreateOrderInput) {
     if (!product) throw new AppError(400, "Produto inválido no pedido");
     if (!product.available) throw new AppError(409, `"${product.name}" está indisponível`);
 
-    const unitPrice = product.promoPriceCents ?? product.priceCents;
+    const unitPrice = (product.promoPriceCents ?? product.priceCents) + Math.max(0, item.extraCents ?? 0);
     const validAddons = new Map(
       product.addonGroups.flatMap((pg) => pg.group.addons.map((a) => [a.id, a] as const)),
     );
@@ -246,7 +253,7 @@ export async function createOrder(input: CreateOrderInput) {
 
     return {
       productId: product.id,
-      nameSnapshot: product.name,
+      nameSnapshot: item.variantLabel ? `${product.name} (${item.variantLabel})` : product.name,
       unitPriceCents: unitPrice,
       quantity: item.quantity,
       notes: item.notes,
