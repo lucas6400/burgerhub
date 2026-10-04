@@ -61,9 +61,10 @@ export const env = {
     // default é o que já estava hardcoded nos 3 arquivos que chamam a Anthropic.
     modelHaiku: process.env.ANTHROPIC_MODEL_HAIKU ?? "claude-haiku-4-5",
     modelSonnet: process.env.ANTHROPIC_MODEL_SONNET ?? "claude-sonnet-5",
-    // Modelo que decide o pedido por ferramentas na conversa do bot. Era Haiku, que às vezes
-    // respondia como se tivesse anotado o item sem chamar nenhuma ferramenta (pedido saía vazio).
-    modelExecutor: process.env.ANTHROPIC_MODEL_EXECUTOR ?? process.env.ANTHROPIC_MODEL_SONNET ?? "claude-sonnet-5",
+    // Modelo FIXO pra decidir o pedido na conversa do bot. Vazio = automático: Sonnet só nas mensagens que
+    // mexem no carrinho e Haiku no resto (ver pickExecutorModel), com o Sonnet refazendo o turno se o Haiku
+    // responder sem chamar ferramenta. Fixar o Sonnet em toda mensagem custa ≈6x por resposta.
+    modelExecutor: process.env.ANTHROPIC_MODEL_EXECUTOR ?? "",
   },
   // Transcrição de áudio do WhatsApp (Google Gemini). Sem GEMINI_API_KEY o bot só avisa que não ouve áudio.
   gemini: {

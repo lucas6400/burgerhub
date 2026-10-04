@@ -27,9 +27,21 @@ import { classifyReplyToQuestion } from "./reply-intent.service.js";
  * carrinho) precisa ser persistido e recarregado do banco a cada mensagem.
  */
 
-const MODEL = AI_MODEL_EXECUTOR;
-// Se o modelo principal falhar (queda/sobrecarga da API), tenta o outro antes de desistir.
-const FALLBACK_MODEL = MODEL === AI_MODEL_HAIKU ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
+/**
+ * Qual modelo decide o pedido neste turno. O Sonnet erra bem menos no carrinho (o Haiku já escolheu o
+ * produto errado numa troca de combo e já respondeu sem registrar o item), mas custa ~6x mais por
+ * resposta. Então só entra nas mensagens que mexem no carrinho (item, quantidade, troca, "sem X");
+ * saudação, "entrega", "pix", "sim", localização, horário, status ficam no Haiku. Se
+ * ANTHROPIC_MODEL_EXECUTOR estiver definida, vale ela pra todo turno.
+ */
+const CART_WORK_RE = /\b(muda\w*|troc(a|ar|aria|ado|ou)|troque\w*|tir[ae]\w*|remov\w*|sem|adicion\w*|acrescent\w*|inclu\w*|somente|apenas|no lugar|ao inv[eé]s|em vez|mais um|mais uma|outro|outra|combo\w*|x[\s-]?(tudo|bacon|salada|calabresa|casa)|casa 63|refri\w*|coca|guaran\w*|pepsi|lata|bebida|dois|duas|tr[eê]s|quatro|cinco|\d+\s*x|x\s*\d+)\b/i;
+// Só pedir a lista/cardápio ("quais os combos?") não mexe no carrinho.
+const MENU_QUESTION_RE = /\b(quais|card[aá]pio|lista|op[cç][oõ]es)\b/i;
+function pickExecutorModel(customerText: string): string {
+  if (AI_MODEL_EXECUTOR) return AI_MODEL_EXECUTOR;
+  if (MENU_QUESTION_RE.test(customerText) && !/\bquero\b/i.test(customerText)) return AI_MODEL_HAIKU;
+  return CART_WORK_RE.test(customerText) ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
+}
 const MAX_ITERATIONS = 8;
 const MAX_HISTORY_TURNS = 8;
 const MAX_HISTORY_BYTES = 40_000;
@@ -89,15 +101,6 @@ function formatAddress(address: OrderDraft["address"]): string {
 
 function emptyUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
-}
-
-function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
-  return {
-    inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
-    cacheCreationInputTokens: (a.cacheCreationInputTokens ?? 0) + (b.cacheCreationInputTokens ?? 0),
-    cacheReadInputTokens: (a.cacheReadInputTokens ?? 0) + (b.cacheReadInputTokens ?? 0),
-  };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1334,16 +1337,18 @@ export async function handleAiConversation(
   // troca de modelo; a 4ª descarta o histórico salvo (histórico com problema derrubava toda resposta
   // seguinte — o rascunho e os pedidos vão no bloco dinâmico). Já houve ~9 min sem nenhuma resposta
   // num pico de pedidos porque só havia 2 tentativas rápidas com o mesmo modelo.
+  const primaryModel = pickExecutorModel(text);
+  const fallbackModel = primaryModel === AI_MODEL_HAIKU ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
   const attempts: { model: string; history: Msg[]; waitMs: number }[] = [
-    { model: MODEL, history: data.history, waitMs: 0 },
-    { model: MODEL, history: data.history, waitMs: 1_500 },
-    { model: FALLBACK_MODEL, history: data.history, waitMs: 0 },
-    { model: FALLBACK_MODEL, history: [], waitMs: 0 },
+    { model: primaryModel, history: data.history, waitMs: 0 },
+    { model: primaryModel, history: data.history, waitMs: 1_500 },
+    { model: fallbackModel, history: data.history, waitMs: 0 },
+    { model: fallbackModel, history: [], waitMs: 0 },
   ];
   let runner: ReturnType<typeof startRunner> | undefined;
   let finalMessage: Anthropic.Beta.Messages.BetaMessage | undefined;
   let turnUsage = emptyUsage();
-  let usedModel = MODEL;
+  let usedModel = primaryModel;
   for (const attempt of attempts) {
     if (attempt.waitMs > 0) await sleep(attempt.waitMs);
     try {
@@ -1368,12 +1373,14 @@ export async function handleAiConversation(
   let turnMessages = runner.params.messages as Msg[];
   const draftText = finalMessage.content.filter((b): b is Anthropic.Beta.Messages.BetaTextBlock => b.type === "text").map((b) => b.text).join(" ");
   if (turnMessages[turnMessages.length - 1]?.role === "assistant" && shouldRetryWithoutTool(extractTurnActions(turnMessages), draft, draftText)) {
-    console.error("[ai-conversation] resposta sem chamar ferramenta; refazendo com aviso.", { tenantId, phone });
+    console.error("[ai-conversation] resposta sem chamar ferramenta; refazendo com aviso (modelo mais forte).", { tenantId, phone });
     try {
       const base = turnMessages;
-      const retryRunner = startRunner(usedModel, [...base, { role: "user", content: MISSING_TOOL_NUDGE }]);
+      // O modelo barato é o padrão; é aqui, só quando ele escorrega, que entra o Sonnet — o custo de
+      // usar o Sonnet em toda mensagem era ~6x o do Haiku por resposta.
+      const retryRunner = startRunner(AI_MODEL_SONNET, [...base, { role: "user", content: MISSING_TOOL_NUDGE }]);
       const retry = await consumeRunner(retryRunner);
-      turnUsage = addUsage(turnUsage, retry.usage);
+      background(logAiUsage(tenantId, "conversation_executor" satisfies AiUsagePurpose, AI_MODEL_SONNET, retry.usage));
       finalMessage = retry.finalMessage;
       turnMessages = [...base.slice(0, -1), ...(retryRunner.params.messages as Msg[]).slice(base.length + 1)];
     } catch (err) {
