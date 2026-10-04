@@ -61,6 +61,9 @@ export const env = {
     // default é o que já estava hardcoded nos 3 arquivos que chamam a Anthropic.
     modelHaiku: process.env.ANTHROPIC_MODEL_HAIKU ?? "claude-haiku-4-5",
     modelSonnet: process.env.ANTHROPIC_MODEL_SONNET ?? "claude-sonnet-5",
+    // Modelo que decide o pedido por ferramentas na conversa do bot. Era Haiku, que às vezes
+    // respondia como se tivesse anotado o item sem chamar nenhuma ferramenta (pedido saía vazio).
+    modelExecutor: process.env.ANTHROPIC_MODEL_EXECUTOR ?? process.env.ANTHROPIC_MODEL_SONNET ?? "claude-sonnet-5",
   },
   // Transcrição de áudio do WhatsApp (Google Gemini). Sem GEMINI_API_KEY o bot só avisa que não ouve áudio.
   gemini: {

@@ -14,7 +14,7 @@ import { moveLead } from "./labels.service.js";
 import { recordOutboundMessage } from "./messages.service.js";
 import { getWhatsAppSenderFor, instanceNameFor, waTransport, type WaRawImageMessage } from "./transport.js";
 import { isStoreOpenNow, nowInStoreTimezone } from "../../utils/storeTime.js";
-import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET } from "../ai/anthropic-client.js";
+import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET, AI_MODEL_EXECUTOR } from "../ai/anthropic-client.js";
 import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
 import type { TokenUsage } from "../ai/pricing.js";
 import { composeReply } from "./redator.service.js";
@@ -26,7 +26,9 @@ import { composeReply } from "./redator.service.js";
  * carrinho) precisa ser persistido e recarregado do banco a cada mensagem.
  */
 
-const MODEL = AI_MODEL_HAIKU;
+const MODEL = AI_MODEL_EXECUTOR;
+// Se o modelo principal falhar (queda/sobrecarga da API), tenta o outro antes de desistir.
+const FALLBACK_MODEL = MODEL === AI_MODEL_HAIKU ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
 const MAX_ITERATIONS = 8;
 const MAX_HISTORY_TURNS = 8;
 const MAX_HISTORY_BYTES = 40_000;
@@ -86,6 +88,34 @@ function formatAddress(address: OrderDraft["address"]): string {
 
 function emptyUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheCreationInputTokens: (a.cacheCreationInputTokens ?? 0) + (b.cacheCreationInputTokens ?? 0),
+    cacheReadInputTokens: (a.cacheReadInputTokens ?? 0) + (b.cacheReadInputTokens ?? 0),
+  };
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Avisa a equipe (WhatsApp de alerta) que o bot não está conseguindo responder — no máximo 1 aviso a cada 10 min por loja. */
+const lastBotDownAlertAt = new Map<string, number>();
+function alertBotDown(tenantId: string, phone: string): void {
+  const now = Date.now();
+  if (now - (lastBotDownAlertAt.get(tenantId) ?? 0) < 10 * 60_000) return;
+  lastBotDownAlertAt.set(tenantId, now);
+  background(
+    (async () => {
+      const s = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { orderAlertPhone: true } });
+      const sender = s?.orderAlertPhone ? await getWhatsAppSenderFor(tenantId) : null;
+      if (sender && s?.orderAlertPhone) {
+        await sender.sendText(s.orderAlertPhone, `🚨 *O bot não está conseguindo responder* (cliente ${phone}). A IA falhou nas 4 tentativas — pode ser instabilidade da API. Assuma as conversas direto no WhatsApp até normalizar.`);
+      }
+    })().catch((err) => console.error("Falha ao alertar que o bot está sem resposta:", err)),
+  );
 }
 
 /**
@@ -333,7 +363,7 @@ Regras importantes:
 - "Quero o mesmo de ontem" / "repete meu último pedido": use a ferramenta repeat_last_order (o ÚLTIMO PEDIDO do cliente aparece no estado do pedido). Depois de montar o carrinho, leia os itens pro cliente. Se o último foi entrega, pergunte se é no MESMO endereço — se sim, chame repeat_last_order com reuseAddress true; se não, peça a nova localização. Confirme forma de pagamento como sempre antes de finalizar.
 - DINHEIRO E TROCO: no dinheiro pergunte só "Vai precisar de troco? Se sim, pra quanto?". "Trocado", "tá trocado", "tenho trocado", "estou trocado", "está trocando", "certinho", "sem troco", "não precisa" significam que o cliente TEM o valor trocado/exato e NÃO precisa de troco — registre CASH com changeForCents null e siga pro resumo, sem perguntar mais nada sobre troco. "Troco pra 100" = changeForCents 10000. Nunca responda "quanto você quer de troco" nem interprete "trocado" como "trocar de ideia".
 - NUNCA invente: (a) promoção — os COMBOS do cardápio SÃO a promoção; nunca diga "não temos promoção" nem dê nome de promoção ("Combo da Fome" etc.); (b) chave Pix, CNPJ ou CPF — só a ferramenta send_pix_key manda a chave, nunca escreva números de chave no texto; (c) que a loja está fechada/aberta — use só o status ABERTA/FECHADA do estado; (d) onde o cliente mora ou se entregamos lá a partir de uma foto/imagem ou de um nome de bairro — entrega só se confirma pela 📍 localização.
-- CLIENTE QUE JÁ PEDIU ANTES (aparece "ÚLTIMO PEDIDO" no estado): trate como cliente conhecido, sem repetir boas-vindas nem regras. Se ele pedir "o mesmo", "o de sempre" ou nomear um item, adicione direto com update_cart_item (ou repeat_last_order) e, como já tem dados, pergunte se a entrega é no MESMO endereço de antes — se ele confirmar, chame use_last_address (sem pedir localização de novo). Nunca mande a mensagem de boas-vindas/apresentação de novo no meio da conversa. "?" ou mensagem curta e vaga de cliente conhecido = ele quer o mesmo de antes: ofereça repetir o último pedido em uma frase.
+- CLIENTE QUE JÁ PEDIU ANTES (aparece "ÚLTIMO PEDIDO" no estado): trate como cliente conhecido, sem repetir boas-vindas nem regras. Se ele pedir "o mesmo", "o de sempre" ou nomear um item, adicione direto com update_cart_item (ou repeat_last_order) e, como já tem dados, pergunte se a entrega é no MESMO endereço de antes — se ele confirmar, chame use_last_address (sem pedir localização de novo). Nunca mande a mensagem de boas-vindas/apresentação de novo no meio da conversa. "?" ou mensagem curta e vaga de cliente conhecido = ele quer o mesmo de antes: ofereça repetir o último pedido em uma frase. NUNCA force o pedido anterior: se a mensagem pedir outra coisa (cardápio, outro item, uma pergunta), atenda o que ele pediu e esqueça o pedido de antes — já houve cliente que desistiu porque o bot insistia no mesmo pedido. Só use repeat_last_order/use_last_address se ele pedir ou aceitar com clareza, e nunca assuma o endereço antigo sem ele confirmar.
 - CLIENTE COM PEDIDO RECENTE (aparece "PEDIDO EM ANDAMENTO" no estado): se a mensagem dele NÃO pedir claramente algo novo (produto, "quero", "outro pedido"), ele está comentando, agradecendo ou tirando dúvida sobre ESSE pedido — responda curto e direto a isso (status real, prazo, etc.). NUNCA mande "seja bem-vindo"/apresentação da loja nem pergunte "o que você gostaria de pedir" pra quem já tem pedido em andamento.
 - TOM NEUTRO, SEMPRE: fale em português claro, educado e neutro, o MESMO tom com todo mundo. NUNCA imite o jeito de falar do cliente: nada de "brother", "mano", "chefe", "parceiro", "meu rei", gírias, apelidos, expressões dele, sotaque, palavrão nem emoji de gíria (🤙). Não chame o cliente de nada além do nome que ele mesmo disse. Não repita as palavras dele de volta; responda ao conteúdo.
 - MENSAGENS DE ÁUDIO (começam com "🎤 (áudio)"): são transcrição automática de fala — podem ter erro, ruído, gíria e trechos falados com OUTRAS pessoas ao fundo. Use só o que for claramente sobre o pedido; ignore conversa paralela; se algo importante estiver duvidoso, pergunte em UMA frase curta ("Só confirmando: você quis dizer X?") em vez de assumir. Nunca cite nem imite a transcrição.
@@ -345,7 +375,12 @@ Regras importantes:
 - Se o cliente pedir refrigerante/bebida sem especificar marca ou sabor, NÃO pergunte qual marca/sabor ele quer — apenas registre o item do cardápio normalmente. O estoque de marcas varia e quem decide o que vai é a loja no preparo, não o cliente no pedido.
 - TROCA OU ESCOLHA DE MARCA DE REFRI ("troca o guaraná por coca", "quero coca"): NUNCA confirme, prometa nem negue marca alguma (nem Coca, nem Pepsi, nem Guaraná) — já aconteceu de prometerem Coca e chegar Guaraná. Diga só que a marca depende do estoque do dia e que a loja manda o que tiver, e siga o pedido normalmente. Nunca escreva "consigo trocar", "sem problema" nem "anotei a troca".
 - ITEM FORA DO CARDÁPIO (cremes, sobremesas, lanche kids, qualquer coisa que não esteja na lista acima): diga com educação que não tem no cardápio. NUNCA ofereça como se existisse, nem diga "consigo", "posso pedir pra cozinha" ou "vou adicionar". Se o cliente insistir, diga que vai confirmar com a equipe.
-- Quando o cliente mandar várias mensagens seguidas com mais de uma pergunta, responda TODAS (uma frase curta pra cada), sem esquecer nenhuma. Se ele só pedir pra aguardar ("só um instante"), responda curto e simpático, sem repetir o pedido nem puxar a venda.`;
+- Quando o cliente mandar várias mensagens seguidas com mais de uma pergunta, responda TODAS (uma frase curta pra cada), sem esquecer nenhuma. Se ele só pedir pra aguardar ("só um instante"), responda curto e simpático, sem repetir o pedido nem puxar a venda.
+- REGISTRE ANTES DE RESPONDER: quando o cliente pedir um item, trocar ou tirar algo, você DEVE chamar update_cart_item NESTA resposta — nunca escreva "boa escolha", "adicionei", "anotei" nem o preço como se já estivesse no pedido sem ter chamado a ferramenta (já aconteceu de o pedido seguir pro pagamento com o carrinho vazio). Depois de chamar, confira o "Carrinho agora" que a ferramenta devolveu: se ainda tiver o item que o cliente mandou trocar/tirar, remova-o (quantity 0) antes de responder. Ao pedir pra trocar de combo, o antigo SAI e o novo ENTRA.
+- Número no meio de uma frase é QUANTIDADE, não posição da lista: "2 x tudo + refri 1L" são 2 X-Tudo (combo de 2), nunca o item nº 2 da lista. Só uma mensagem que seja SÓ o número ("4") é posição da lista.
+- Referência de endereço ou recado pro entregador ("portão azul", "ao lado da papelaria", "liga quando chegar"): se já existe pedido em andamento, chame request_order_change com o texto; se ainda é só o carrinho, registre em notes do primeiro item (update_cart_item, ex.: "REF. ENTREGA: portão azul"). NUNCA diga "vou repassar pro entregador" ou "anotei o endereço" sem ter registrado.
+- Nunca comente nem explique o que aparece em outros apps (iFood etc.) e nunca diga que vai mandar a chave Pix: ela só sai pelo sistema quando o cliente pedir pra pagar na hora. Pagamento dividido entre formas (metade Pix, metade cartão) ou vale-alimentação: não recuse nem aceite por conta própria — diga que vai confirmar com a equipe e siga o pedido.
+- Se o cliente perguntar se avisamos quando o pedido sair: diga que SIM, a equipe avisa pelo WhatsApp quando sai pra entrega e quando o entregador chega.`;
 }
 
 function replaceLastAssistantText(history: Anthropic.Beta.Messages.BetaMessageParam[], text: string): Anthropic.Beta.Messages.BetaMessageParam[] {
@@ -368,10 +403,12 @@ async function buildAdIntro(tenantId: string, tenantName: string, draft: OrderDr
       select: { description: true },
     });
     const ingredients = (base?.description ?? "").split(/[\n,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).join(", ");
-    if (ingredients) descLine = `\nO X-${token} é bem completo, feito na hora: ${ingredients.slice(0, 260)}.`;
+    if (ingredients) descLine = `\nO X-${token} é bem completo, feito na hora: ${ingredients.slice(0, 260).replace(/[.\s,]+$/, "")}.`;
   }
 
-  const head = `Oi! 🍔 Seja bem-vindo à *${tenantName}*.\nHoje o combo é *${items}* por *${brl(draftTotal(draft))}*.${descLine}`;
+  // "Hoje o combo é" só faz sentido pra combo — quem pediu um lanche avulso lia "Hoje o combo é 2x X Bacon".
+  const offerLine = draft.cart.some((i) => /\+|combo/i.test(i.name)) ? `Hoje o combo é *${items}* por *${brl(draftTotal(draft))}*.` : `Anotei *${items}* — *${brl(draftTotal(draft))}*.`;
+  const head = `Oi! 🍔 Seja bem-vindo à *${tenantName}*.\n${offerLine}${descLine}`;
   const tail = "Me manda sua 📍 localização (📎 → Localização → Enviar localização atual) que eu confirmo a taxa e o tempo de entrega na hora — ou, se preferir, é retirada no balcão. 🛵";
   return { head, tail, imageUrl: product?.whatsappImageUrl ?? product?.imageUrl ?? undefined, imageName: product?.name };
 }
@@ -391,7 +428,7 @@ const phoneTail = (phone: string) => phone.replace(/\D/g, "").slice(-8);
 
 /** Frases em que a IA afirma que o pedido foi confirmado/finalizado — usado como rede de segurança contra hallucination (ver uso em handleAiConversation). */
 const FALSE_CONFIRMATION_RE =
-  /pedido\s*(foi|est[aá])?\s*confirmad[oa]|confirmamos\s+(o\s+)?seu\s+pedido|n[uú]mero\s+do\s+(seu\s+)?pedido|(est[aá]|foi|vai)\s+a\s+caminho|entregador\s+(chega|est[aá]\s+a\s+caminho)|pedido\s+(j[aá]\s+)?(foi\s+)?(registrado|enviado|anotado)|confirmar\s+essa\s+altera[cç][aã]o|equipe\s+est[aá]\s+acompanhando/i;
+  /pedido\s*(foi|est[aá])?\s*confirmad[oa]|confirmamos\s+(o\s+)?seu\s+pedido|n[uú]mero\s+do\s+(seu\s+)?pedido|(est[aá]|foi|vai)\s+a\s+caminho|entregador\s+(chega|est[aá]\s+a\s+caminho)|pedido\s+(j[aá]\s+)?(foi\s+)?(registrado|enviado|anotado)|confirmar\s+essa\s+altera[cç][aã]o|equipe\s+est[aá]\s+acompanhando|j[aá]\s+(t[aá]|est[aá])\s+(vindo|saindo|a\s+caminho|indo)|(lanche|pedido|entregador)\s+(j[aá]\s+)?(t[aá]|est[aá])\s+(a\s+caminho|saindo|vindo|indo|sendo\s+preparado|na\s+fila|preparando)|na\s+fila\s+da\s+cozinha|entregador\s+(j[aá]\s+)?(saiu|t[aá]\s+indo|est[aá]\s+indo)/i;
 
 /** Resposta curta que confirma um resumo já lido ("sim", "ok", "pode confirmar"...). */
 /** O modelo às vezes NARRA a forma de pagamento sem chamar set_payment_method — o cliente disse, o código registra. */
@@ -569,17 +606,93 @@ function neutralizeTone(text: string): string {
  * "Guaraná" sozinho NÃO dispara: vem no texto dos anúncios ("combo ... + Guaraná 1L").
  */
 const SODA_BRAND_RE = /\b(coca(?:[\s-]?cola)?|pepsi|fanta|sprite|guaran[aá]|sukita|dolly)\b/i;
-const SODA_SWAP_REQUEST_RE = /\b(coca(?:[\s-]?cola)?|pepsi|fanta|sprite)\b|(troc|mud|substitu|no lugar|em vez|ao inv[eé]s)[^.?!\n]{0,40}(refri|guaran|bebida)/i;
-const SODA_PROMISE_RE = /prefer[eê]ncia|\btroc(a|ar|amos)\b|registrad|anotei|deixei (anotad|registrad)/i;
+const SODA_SWAP_REQUEST_RE = /\b(coca(?:[\s-]?cola)?|pepsi|fanta|sprite)\b|(troc|mud|substitu|no lugar|em vez|ao inv[eé]s)[^.?!\n]{0,40}guaran/i;
+const SODA_QUESTION_OR_SWAP_RE = /\?|\btem\b|\btroc|\bconsegue\b|\bpode ser\b|\bd[aá] pra\b/i;
+const SODA_PROMISE_RE = /prefer[eê]ncia|\btroc(a|ar|amos)\b|registrad|anotei|deixei (anotad|registrad)|\bconsigo\b|\bsem problema\b|\bpode sim\b|\bclaro\b/i;
 const SODA_SAFE_LINE = "Sobre o refrigerante: a marca depende do estoque do dia e a loja manda o que tiver — não dá pra garantir uma marca específica 😊";
 
-function guardSodaBrand(customerText: string, replies: string[], nextStep: string): string[] {
+export function guardSodaBrand(customerText: string, replies: string[], nextStep: string): string[] {
   if (!SODA_SWAP_REQUEST_RE.test(customerText)) return replies;
+  let removedAny = false;
   const kept = replies
-    .map((r) => r.split(/(?<=[.!?])\s+|\n+/).filter((s) => !SODA_BRAND_RE.test(s) && !SODA_PROMISE_RE.test(s)).join(" ").trim())
+    .map((reply) =>
+      reply
+        .split("\n")
+        .map((line) =>
+          line
+            .split(/(?<=[.!?])\s+/)
+            .filter((sentence) => {
+              const bad = SODA_BRAND_RE.test(sentence) || SODA_PROMISE_RE.test(sentence);
+              if (bad) removedAny = true;
+              return !bad;
+            })
+            .join(" ")
+            .trim(),
+        )
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    )
     .filter(Boolean);
-  if (kept.join(" ") === replies.join(" ")) return replies;
+  if (!removedAny) {
+    // Nada a cortar, mas a pergunta sobre marca ("tem Coca?") ficou sem resposta: já aconteceu de a IA ignorá-la.
+    return /estoque/i.test(replies.join(" ")) || !SODA_QUESTION_OR_SWAP_RE.test(customerText) ? replies : [SODA_SAFE_LINE, ...replies];
+  }
   return [`${SODA_SAFE_LINE}\n\n${kept.length > 0 ? kept.join("\n\n") : nextStep}`];
+}
+
+/**
+ * Resposta curta que é SÓ um "sim" ("sim", "pode", "isso mesmo", "quero o mesmo"). "Pode me mandar o
+ * cardápio?" começa com "pode" mas NÃO é aceite — já virou pedido repetido à força pra cliente que queria
+ * outra coisa, e ela desistiu.
+ */
+const AFFIRM_TOKENS_RE = /\b(sim+|ss|s|ok|okay|pode|ser|isso|mesmo|certo|beleza|blz|fechado|confirmo|claro|positivo|bora|quero|vamos|por favor|pfv|pf|favor|o|a|de|novo|aham|uhum)\b|👍|[!.,]/gi;
+export function isPlainAffirmation(text: string): boolean {
+  const t = text.trim();
+  return t.length > 0 && t.length <= 40 && !t.includes("?") && t.replace(AFFIRM_TOKENS_RE, "").trim() === "";
+}
+
+/**
+ * O Redator já escreveu pro cliente a conferência que ele fez do rascunho ("O estado mostra que...",
+ * "deixa eu corrigir", "como diz o rascunho"). Tira essas frases; o resto da mensagem continua valendo.
+ */
+const META_LEAK_RE = /\brascunho\b|\bdeixa eu corrigir\b|\bcorrigindo:|\bo estado (mostra|confirma|ainda mostra|indica|atual)\b|\bresultado da a[cç][aã]o\b|\ba[cç][oõ]es registradas\b|\bnota interna\b|\banota[cç][aã]o interna\b|\bferramenta\b/i;
+export function stripMetaCommentary(text: string): string {
+  if (!META_LEAK_RE.test(text)) return text;
+  return text
+    .split("\n")
+    .map((line) =>
+      line
+        .split(/(?<=[.!?])\s+/)
+        .filter((sentence) => !META_LEAK_RE.test(sentence))
+        .join(" ")
+        .trim(),
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * A IA responder como se tivesse anotado/alterado o pedido SEM chamar nenhuma ferramenta (5% das
+ * conversas): o carrinho ficava vazio, o pedido avançava sem item e o cliente só percebia no fim.
+ */
+const CLAIMS_CART_CHANGE_RE = /\b(adicionei|adicionad[oa]|anotei|anotad[oa]|coloquei|inclu[ií]|troquei|mudei|removi|tirei|retirei|atualizei|boa escolha)\b|j[aá] (est[aá]|ficou) no (carrinho|pedido)/i;
+const PROGRESS_ON_EMPTY_CART_RE = /entrega ou retirada|forma de pagamento|como (vai|prefere|quer) pagar|posso confirmar|pix, (cart[aã]o|dinheiro)|resumo do (seu )?pedido/i;
+export function shouldRetryWithoutTool(actions: string[], draft: OrderDraft, draftText: string): boolean {
+  if (actions.length > 0 || draft.finalizedOrderId) return false;
+  if (CLAIMS_CART_CHANGE_RE.test(draftText)) return true;
+  return draft.cart.length === 0 && PROGRESS_ON_EMPTY_CART_RE.test(draftText);
+}
+const MISSING_TOOL_NUDGE =
+  "[AVISO DO SISTEMA — não é uma mensagem do cliente] Na sua resposta anterior você NÃO chamou nenhuma ferramenta, então NADA foi registrado no pedido (veja o estado: carrinho, tipo e pagamento continuam como estavam). Releia a última mensagem do cliente e chame agora as ferramentas necessárias (update_cart_item para itens, set_fulfillment_type, set_payment_method etc.). Se o cliente só fez uma pergunta e não pediu nada, responda sem registrar nada. Depois escreva a resposta ao cliente conforme o resultado REAL das ferramentas.";
+
+/** Deixa no histórico o que o cliente de fato recebeu (e não o rascunho da IA) — o próximo turno parte do que foi dito de verdade. */
+function syncFinalAssistantText(history: Anthropic.Beta.Messages.BetaMessageParam[], text: string): Anthropic.Beta.Messages.BetaMessageParam[] {
+  const last = history[history.length - 1];
+  if (!last || last.role === "user") return [...history, { role: "assistant", content: text }];
+  const onlyText = typeof last.content === "string" || last.content.every((b) => b.type === "text");
+  return onlyText ? [...history.slice(0, -1), { role: "assistant", content: text }] : history;
 }
 
 /** "hoje às 18:30" / "amanhã às 18:30" / "domingo às 18:30" — próxima abertura pelo horário cadastrado. */
@@ -610,7 +723,7 @@ function nextStepPrompt(draft: OrderDraft): string {
 
 function menuLine(draft: OrderDraft): string {
   if (!draft.lastMenu?.length) return "";
-  return `\n\nÚLTIMA LISTA NUMERADA ENVIADA AO CLIENTE (o número que ele mandar é a posição aqui): ${draft.lastMenu.map((m) => `${m.n}=${m.name}`).join("; ")}`;
+  return `\n\nÚLTIMA LISTA NUMERADA ENVIADA AO CLIENTE (o número que ele mandar é a posição aqui): ${draft.lastMenu.map((m) => `${m.n}=${m.name}`).join("; ")}. Só vale como posição da lista uma mensagem que seja SÓ o número (ex.: "4"); "2 x tudo + refri" é QUANTIDADE (2 unidades do X Tudo), nunca o item nº 2.`;
 }
 
 function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOrders: string, lastOrder: string): string {
@@ -619,7 +732,11 @@ function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOr
   // adivinhar isso só pelo texto do horário cadastrado.
   const { weekday, hhmm } = nowInStoreTimezone();
   const days = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
-  const activeLine = activeOrders ? `\n\nPEDIDO EM ANDAMENTO deste cliente (status real):\n${activeOrders}` : "";
+  const activeLine = activeOrders
+    ? `\n\nPEDIDO EM ANDAMENTO deste cliente (status real):\n${activeOrders}`
+    : draft.finalizedOrderId
+      ? ""
+      : "\n\nSTATUS DO PEDIDO (verdade absoluta): NENHUM pedido deste cliente foi enviado à cozinha ainda. NUNCA diga que está confirmado, na fila, sendo preparado, saindo, a caminho ou \"vindo\" — isso só vale depois que finalize_order devolver o número do pedido. O pedido só é feito quando o cliente confirmar o resumo e você chamar finalize_order.";
   const openLine = `Agora é ${days[weekday]}, ${hhmm} (horário da loja). A loja está ${isOpenNow ? "ABERTA" : "FECHADA"} neste exato momento — use isso pra responder se dá pra pedir agora, nunca calcule você mesmo a partir do texto do horário.${activeLine}`;
 
   if (draft.cart.length === 0 && !draft.type && !draft.paymentMethod) {
@@ -863,7 +980,7 @@ export async function handleAiConversation(
     const closedPrefix = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours })
       ? ""
       : `⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(tenant.businessHours)}. Mas já posso anotar seu pedido! 😊\n\n`;
-    if (draft.offeredRepeat && flat.length <= 40 && START_AFFIRM_RE.test(flat) && !CHANGE_INTENT_RE.test(flat)) {
+    if (draft.offeredRepeat && isPlainAffirmation(flat) && !CHANGE_INTENT_RE.test(flat)) {
       draft.offeredRepeat = undefined;
       await repeatLastOrderInto(tenantId, phone, draft, true);
       if (draft.cart.length > 0) {
@@ -885,6 +1002,10 @@ export async function handleAiConversation(
         await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
         return [reply];
       }
+    } else {
+      // O cliente respondeu outra coisa (cardápio, outro item, uma pergunta): a oferta do pedido
+      // anterior expira — um "sim" mais tarde não pode remontar o pedido velho à força.
+      draft.offeredRepeat = undefined;
     }
   }
 
@@ -934,9 +1055,13 @@ export async function handleAiConversation(
       if (!product) throw new Error("Esse item não está disponível no cardápio.");
       const price = product.promoPriceCents ?? product.priceCents;
       const existing = draft.cart.find((i) => i.productId === productId);
+      // Sempre devolve o carrinho INTEIRO: antes "Removido: X" voltava mesmo quando X nem estava no
+      // carrinho, a IA achava que tinha trocado o combo e o pedido seguia com os dois (R$140 em vez de R$90).
+      const cartNow = () => (draft.cart.length > 0 ? draft.cart.map((i) => `${i.quantity}x ${i.name}`).join(", ") : "vazio");
       if (quantity === 0) {
         draft.cart = draft.cart.filter((i) => i.productId !== productId);
-        return `Removido: ${product.name}.`;
+        if (!existing) return `ATENÇÃO: "${product.name}" NÃO estava no carrinho — nada foi removido. Carrinho agora: ${cartNow()}. Confira o estado e remova o item certo.`;
+        return `Removido: ${product.name}. Carrinho agora: ${cartNow()}.`;
       }
       if (existing) {
         existing.quantity = quantity;
@@ -945,7 +1070,7 @@ export async function handleAiConversation(
       } else {
         draft.cart.push({ productId, name: product.name, unitPriceCents: price, quantity, notes: notes ?? undefined });
       }
-      return `Carrinho atualizado: ${quantity}x ${product.name} (${brl(price)} cada). Subtotal atual: ${brl(draftTotal(draft))}.`;
+      return `Carrinho atualizado: ${quantity}x ${product.name} (${brl(price)} cada). Carrinho agora: ${cartNow()}. Subtotal atual: ${brl(draftTotal(draft))}. Se o cliente pediu pra TROCAR ou TIRAR outro item e ele ainda está na lista acima, remova-o (quantity 0) antes de responder.`;
     },
   });
 
@@ -1178,34 +1303,71 @@ export async function handleAiConversation(
     ];
   }
 
-  const startRunner = (history: Anthropic.Beta.Messages.BetaMessageParam[]) =>
+  type Msg = Anthropic.Beta.Messages.BetaMessageParam;
+  const startRunner = (model: string, messages: Msg[]) =>
     getAnthropicClient().beta.messages.toolRunner({
-      model: MODEL,
+      model,
       max_tokens: 500,
       max_iterations: MAX_ITERATIONS,
+      // O modelo pensa por padrão e isso só gasta tempo/tokens aqui — a decisão é por ferramentas.
+      thinking: { type: "disabled" },
       system,
       tools,
-      messages: [...markCacheBreakpoint(history), { role: "user", content: userContent }],
+      messages,
     });
+  const turnMessagesFor = (history: Msg[]): Msg[] => [...markCacheBreakpoint(history), { role: "user", content: userContent }];
 
-  let runner = startRunner(data.history);
-  let finalMessage: Anthropic.Beta.Messages.BetaMessage;
+  // Tentativas em ordem. A 2ª espera um pouco (queda/sobrecarga da API costuma ser passageira); a 3ª
+  // troca de modelo; a 4ª descarta o histórico salvo (histórico com problema derrubava toda resposta
+  // seguinte — o rascunho e os pedidos vão no bloco dinâmico). Já houve ~9 min sem nenhuma resposta
+  // num pico de pedidos porque só havia 2 tentativas rápidas com o mesmo modelo.
+  const attempts: { model: string; history: Msg[]; waitMs: number }[] = [
+    { model: MODEL, history: data.history, waitMs: 0 },
+    { model: MODEL, history: data.history, waitMs: 1_500 },
+    { model: FALLBACK_MODEL, history: data.history, waitMs: 0 },
+    { model: FALLBACK_MODEL, history: [], waitMs: 0 },
+  ];
+  let runner: ReturnType<typeof startRunner> | undefined;
+  let finalMessage: Anthropic.Beta.Messages.BetaMessage | undefined;
   let turnUsage = emptyUsage();
-  try {
-    ({ finalMessage, usage: turnUsage } = await consumeRunner(runner));
-  } catch (err) {
-    console.error("[ai-conversation] falha ao processar conversa, tentando de novo sem o histórico:", err);
-    // Um histórico salvo com problema derrubava toda resposta seguinte: tenta uma
-    // vez só com a mensagem atual (o rascunho e os pedidos vão no bloco dinâmico).
+  let usedModel = MODEL;
+  for (const attempt of attempts) {
+    if (attempt.waitMs > 0) await sleep(attempt.waitMs);
     try {
-      runner = startRunner([]);
-      ({ finalMessage, usage: turnUsage } = await consumeRunner(runner));
-    } catch (err2) {
-      console.error("[ai-conversation] falha também sem histórico:", err2);
-      return ["Desculpa, tive um problema aqui. Pode repetir sua mensagem? 🙏"];
+      const candidate = startRunner(attempt.model, turnMessagesFor(attempt.history));
+      const result = await consumeRunner(candidate);
+      runner = candidate;
+      finalMessage = result.finalMessage;
+      turnUsage = result.usage;
+      usedModel = attempt.model;
+      break;
+    } catch (err) {
+      console.error(`[ai-conversation] falha ao processar conversa (${attempt.model}, ${attempt.history.length} msgs de histórico):`, err);
     }
   }
-  background(logAiUsage(tenantId, "conversation_executor" satisfies AiUsagePurpose, MODEL, turnUsage));
+  if (!runner || !finalMessage) {
+    alertBotDown(tenantId, phone);
+    return ["Desculpa, tive um problema aqui. Pode repetir sua mensagem? 🙏"];
+  }
+
+  // A IA às vezes responde como se tivesse anotado o item sem chamar ferramenta nenhuma. Uma segunda
+  // passada com aviso resolve; o rascunho sem ferramenta e o aviso saem do histórico salvo.
+  let turnMessages = runner.params.messages as Msg[];
+  const draftText = finalMessage.content.filter((b): b is Anthropic.Beta.Messages.BetaTextBlock => b.type === "text").map((b) => b.text).join(" ");
+  if (turnMessages[turnMessages.length - 1]?.role === "assistant" && shouldRetryWithoutTool(extractTurnActions(turnMessages), draft, draftText)) {
+    console.error("[ai-conversation] resposta sem chamar ferramenta; refazendo com aviso.", { tenantId, phone });
+    try {
+      const base = turnMessages;
+      const retryRunner = startRunner(usedModel, [...base, { role: "user", content: MISSING_TOOL_NUDGE }]);
+      const retry = await consumeRunner(retryRunner);
+      turnUsage = addUsage(turnUsage, retry.usage);
+      finalMessage = retry.finalMessage;
+      turnMessages = [...base.slice(0, -1), ...(retryRunner.params.messages as Msg[]).slice(base.length + 1)];
+    } catch (err) {
+      console.error("[ai-conversation] segunda passada falhou, mantendo a primeira resposta:", err);
+    }
+  }
+  background(logAiUsage(tenantId, "conversation_executor" satisfies AiUsagePurpose, usedModel, turnUsage));
 
   // O código do Pix sai como mensagem própria, controlado por código — nunca
   // confiando que a IA vá de fato separar o texto sozinha (nem sempre separa).
@@ -1224,7 +1386,7 @@ export async function handleAiConversation(
   }
 
   // Não guarda a imagem (base64) no histórico do banco — vira uma linha de texto.
-  const savedMessages = (runner.params.messages as Anthropic.Beta.Messages.BetaMessageParam[]).map((m) => {
+  const savedMessages = turnMessages.map((m) => {
     if (m.role === "user" && Array.isArray(m.content) && m.content.some((b) => b.type === "image")) {
       const caption = m.content.find((b): b is Anthropic.Beta.Messages.BetaTextBlockParam => b.type === "text")?.text ?? "";
       return { role: "user" as const, content: `[Cliente enviou uma imagem] ${caption}`.trim() };
@@ -1252,25 +1414,36 @@ export async function handleAiConversation(
           `Horários de funcionamento:\n${hours}`,
           `Consumo no local: ${tenant.settings.acceptsDineIn ? "SIM, a loja tem mesas e o cliente pode comer lá, além de entrega e retirada" : "NÃO, só entrega e retirada para viagem"}`,
           `Entrega: ${generalDeliveryInfo}`,
-          "Pagamento (Pix, cartão de crédito/débito e dinheiro): feito na entrega ou na retirada, direto com o entregador ou no balcão. A chave Pix só é enviada se o cliente pedir pra pagar na hora.",
+          "Pagamento (Pix, cartão de crédito/débito e dinheiro): feito na entrega ou na retirada, direto com o entregador ou no balcão. A chave Pix só é enviada pelo sistema se o cliente pedir pra pagar na hora — nunca prometa mandar a chave.",
           "Refrigerante: a marca/sabor depende do estoque do dia; a loja manda o que tiver.",
+          "Promoção: os COMBOS do cardápio SÃO as promoções da loja — nunca diga que não tem promoção.",
+          "Aviso de entrega: a EQUIPE avisa o cliente pelo WhatsApp quando o pedido sai pra entrega e quando o entregador chega. Só diga que o entregador saiu/está a caminho se o ESTADO mostrar esse status.",
+          "Recado/referência de endereço do cliente (ex.: \"portão azul\"): só diga que foi repassado se aparecer nas AÇÕES REGISTRADAS; senão diga que vai confirmar com a equipe.",
+          "Outros apps (iFood etc.): nunca comente nem explique o que aparece neles.",
         ].join("\n"),
         stateText: dynamicStateText,
         draftReply: texts.join("\n\n"),
-        turnActions: extractTurnActions(runner.params.messages as Anthropic.Beta.Messages.BetaMessageParam[]),
+        turnActions: extractTurnActions(turnMessages),
         // Só o que o cliente mandou NESTE turno: passar as últimas mensagens antigas fazia o
         // Redator responder de novo perguntas que o bot já tinha respondido.
         customerMessage: text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : ""),
         previousBotReply: prevAssistantText,
         isFirstReply: firstTurn,
       });
-      if (composed.replies.length > 0) replies = composed.replies;
+      // O Redator já escreveu pro cliente a própria conferência ("o estado mostra...", "como diz o rascunho"):
+      // tira essas frases; se não sobrar nada, vale o rascunho do Executor.
+      const composedClean = composed.replies.map(stripMetaCommentary).filter(Boolean);
+      if (composed.replies.some((r) => META_LEAK_RE.test(r))) console.error("[ai-conversation] Redator vazou comentário interno — removido.", { tenantId, phone, original: composed.replies.join(" ").slice(0, 300) });
+      if (composedClean.length > 0) replies = composedClean;
       background(logAiUsage(tenantId, "conversation_redator" satisfies AiUsagePurpose, AI_MODEL_SONNET, composed.usage));
     } catch (err) {
       // O rascunho do Executor já é uma resposta válida pro cliente — melhor que uma pergunta genérica.
       console.error("[ai-conversation] Redator falhou, enviando o rascunho do Executor:", err);
     }
   }
+
+  // true quando um passo abaixo já deixou no histórico o texto que o cliente realmente recebeu.
+  let historySynced = false;
 
   // Primeira resposta a quem já chegou com um item na mão (clique de anúncio): o modelo
   // costuma responder só "entrega ou retirada?" — troca pelo texto que já convida à
@@ -1302,6 +1475,7 @@ ${intro.tail}`;
     // O histórico guardado tem a fala original do modelo — troca pela que o cliente
     // realmente recebeu, senão o "sim" dele seria lido como resposta à pergunta errada.
     data.history = replaceLastAssistantText(data.history, fullText);
+    historySynced = true;
     await prisma.chatSession.update({ where: { id: session.id }, data: { data: JSON.stringify(data) } });
   }
 
@@ -1338,6 +1512,7 @@ ${isDelivery ? "Entrega" : "Retirada no balcão"} • ${prep} a ${prep + 20} min
 ${payLine}
 A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
       data.history = replaceLastAssistantText(data.history, msg);
+      historySynced = true;
       await prisma.chatSession.update({ where: { id: session.id }, data: { data: JSON.stringify(data) } });
       return [msg];
     } catch (err) {
@@ -1345,7 +1520,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
       return null;
     }
   };
-  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && text.length <= 60 && START_AFFIRM_RE.test(text) && !CHANGE_INTENT_RE.test(text)) {
+  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && text.length <= 60 && !text.includes("?") && START_AFFIRM_RE.test(text) && !CHANGE_INTENT_RE.test(text)) {
     const auto = await autoFinalize();
     if (auto) replies = auto;
   }
@@ -1426,7 +1601,15 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
     replies = [nextStepPrompt(draft)];
   }
 
-  replies = guardSodaBrand(text, replies, nextStepPrompt(draft));
+  replies = guardSodaBrand(text, replies, nextStepPrompt(draft)).map(neutralizeTone);
 
-  return replies.map(neutralizeTone);
+  // O histórico guarda o rascunho da IA; se o cliente recebeu outra coisa (guardas, Redator, abertura
+  // de anúncio), o próximo turno precisa partir do que foi dito de verdade — uma mentira do rascunho
+  // ("seu lanche está a caminho") ficava no histórico, enganava a IA e quebrava o "sim" de confirmação.
+  if (!historySynced && replies.length > 0) {
+    data.history = syncFinalAssistantText(data.history, replies.join("\n\n"));
+    await prisma.chatSession.update({ where: { id: session.id }, data: { data: JSON.stringify(data) } });
+  }
+
+  return replies;
 }
