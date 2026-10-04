@@ -18,6 +18,7 @@ import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET, AI_MODEL_EXECUTOR 
 import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
 import type { TokenUsage } from "../ai/pricing.js";
 import { composeReply } from "./redator.service.js";
+import { classifyReplyToQuestion } from "./reply-intent.service.js";
 
 /**
  * Modo beta: a IA conduz a conversa inteira do pedido (sem menu numerado),
@@ -453,9 +454,7 @@ function lastAssistantText(history: Anthropic.Beta.Messages.BetaMessageParam[]):
 }
 
 /** A última fala da IA pedia confirmação do resumo do pedido. */
-const ASKED_CONFIRM_RE = /(posso|podemos|quer|vamos)[^.?!\n]{0,20}(confirmar|finalizar|fechar|seguir)|tudo certo|est[aá] tudo|tudo pronto|confere a[ií]|resumo/i;
-/** Cliente diz "sim/ok/pode" curto, sem pedir mudança. */
-const START_AFFIRM_RE = /^\s*(sim|ss|ok|okay|pode|isso|certo|beleza|blz|fechado|confirmo|confirmado|claro|positivo|👍)/i;
+const ASKED_CONFIRM_RE = /(posso|podemos|quer|vamos|pode)[^.?!\n]{0,20}(confirmar|finalizar|fechar|seguir)|\bconfirma\b|\bconfirmo\b|tudo certo|est[aá] tudo|tudo pronto|confere a[ií]|resumo|fica assim/i;
 const CHANGE_INTENT_RE = /adicion|troc|tira|mais um|outro|muda|altera|cancel|n[ãa]o/i;
 /** CNPJ ou CPF escrito no texto da IA (chave Pix inventada). */
 const PIX_CONTEXT_RE = /pix|chave|cnpj|cpf|transfer|pagar|pagamento/i;
@@ -639,17 +638,6 @@ export function guardSodaBrand(customerText: string, replies: string[], nextStep
     return /estoque/i.test(replies.join(" ")) || !SODA_QUESTION_OR_SWAP_RE.test(customerText) ? replies : [SODA_SAFE_LINE, ...replies];
   }
   return [`${SODA_SAFE_LINE}\n\n${kept.length > 0 ? kept.join("\n\n") : nextStep}`];
-}
-
-/**
- * Resposta curta que é SÓ um "sim" ("sim", "pode", "isso mesmo", "quero o mesmo"). "Pode me mandar o
- * cardápio?" começa com "pode" mas NÃO é aceite — já virou pedido repetido à força pra cliente que queria
- * outra coisa, e ela desistiu.
- */
-const AFFIRM_TOKENS_RE = /\b(sim+|ss|s|ok|okay|pode|ser|isso|mesmo|certo|beleza|blz|fechado|confirmo|claro|positivo|bora|quero|vamos|por favor|pfv|pf|favor|o|a|de|novo|aham|uhum)\b|👍|[!.,]/gi;
-export function isPlainAffirmation(text: string): boolean {
-  const t = text.trim();
-  return t.length > 0 && t.length <= 40 && !t.includes("?") && t.replace(AFFIRM_TOKENS_RE, "").trim() === "";
 }
 
 /**
@@ -911,6 +899,10 @@ export async function handleAiConversation(
   const cartWasEmpty = draft.cart.length === 0;
   const prevAssistantText = lastAssistantText(data.history);
   const firstTurn = data.history.length === 0;
+  // O cliente aceitou o que o bot acabou de perguntar? ("sim", "quero", "com certeza", "bora"...) — entende a
+  // resposta NO CONTEXTO da pergunta; calculado só se algum passo precisar, e uma vez por turno.
+  let acceptanceCache: boolean | undefined;
+  const customerAccepted = async (): Promise<boolean> => (acceptanceCache ??= (await classifyReplyToQuestion(tenantId, prevAssistantText, text)) === "accept");
 
   // Localização compartilhada pelo WhatsApp: calcula a taxa real na hora, sem
   // depender da IA reconhecer coordenadas dentro de uma mensagem de texto.
@@ -980,7 +972,7 @@ export async function handleAiConversation(
     const closedPrefix = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours })
       ? ""
       : `⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(tenant.businessHours)}. Mas já posso anotar seu pedido! 😊\n\n`;
-    if (draft.offeredRepeat && isPlainAffirmation(flat) && !CHANGE_INTENT_RE.test(flat)) {
+    if (draft.offeredRepeat && !CHANGE_INTENT_RE.test(flat) && (await customerAccepted())) {
       draft.offeredRepeat = undefined;
       await repeatLastOrderInto(tenantId, phone, draft, true);
       if (draft.cart.length > 0) {
@@ -1520,7 +1512,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
       return null;
     }
   };
-  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && text.length <= 60 && !text.includes("?") && START_AFFIRM_RE.test(text) && !CHANGE_INTENT_RE.test(text)) {
+  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && text.length <= 60 && !text.includes("?") && !CHANGE_INTENT_RE.test(text) && (await customerAccepted())) {
     const auto = await autoFinalize();
     if (auto) replies = auto;
   }
@@ -1541,7 +1533,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
   if (!draft.finalizedOrderId && !activeOrders && replies.some((r) => FALSE_CONFIRMATION_RE.test(r))) {
     console.error("[ai-conversation] IA afirmou pedido confirmado sem chamar finalize_order — bloqueado.", { tenantId, phone });
     replies = [nextStepPrompt(draft)];
-    if (AFFIRM_RE.test(text)) {
+    if (AFFIRM_RE.test(text) || (await customerAccepted())) {
       const auto = await autoFinalize();
       if (auto) replies = auto;
     }
