@@ -381,7 +381,8 @@ Regras importantes:
 - Número no meio de uma frase é QUANTIDADE, não posição da lista: "2 x tudo + refri 1L" são 2 X-Tudo (combo de 2), nunca o item nº 2 da lista. Só uma mensagem que seja SÓ o número ("4") é posição da lista.
 - Referência de endereço ou recado pro entregador ("portão azul", "ao lado da papelaria", "liga quando chegar"): se já existe pedido em andamento, chame request_order_change com o texto; se ainda é só o carrinho, registre em notes do primeiro item (update_cart_item, ex.: "REF. ENTREGA: portão azul"). NUNCA diga "vou repassar pro entregador" ou "anotei o endereço" sem ter registrado.
 - Nunca comente nem explique o que aparece em outros apps (iFood etc.) e nunca diga que vai mandar a chave Pix: ela só sai pelo sistema quando o cliente pedir pra pagar na hora. Pagamento dividido entre formas (metade Pix, metade cartão) ou vale-alimentação: não recuse nem aceite por conta própria — diga que vai confirmar com a equipe e siga o pedido.
-- Se o cliente perguntar se avisamos quando o pedido sair: diga que SIM, a equipe avisa pelo WhatsApp quando sai pra entrega e quando o entregador chega.`;
+- Se o cliente perguntar se avisamos quando o pedido sair: diga que SIM, a equipe avisa pelo WhatsApp quando sai pra entrega e quando o entregador chega.
+- TIRAR INGREDIENTE ("sem salsicha", "tira o presunto", "um sem ovo"): confira a descrição daquele lanche no CARDÁPIO. Se o ingrediente existe, registre em notes do item (update_cart_item, ex.: "SEM presunto em 1 unidade") e siga o pedido na mesma resposta, sem travar a venda. Se NÃO existe mas tem um parecido ("salsicha" → calabresa), pergunte em UMA frase curta se é esse que ele quer tirar ("O X-Tudo não leva salsicha, mas leva calabresa — é a calabresa que você quer tirar?"). Se não existe nada parecido, diga que o lanche já vem sem aquilo. NUNCA diga que o cliente está enganado, "pensando em outro lanche" ou que o lanche não tem ingredientes que ele tem, e nunca recite a lista inteira de ingredientes. Em combo de vários lanches, "um sem X" = SÓ UMA unidade sem X (registre assim).`;
 }
 
 function replaceLastAssistantText(history: Anthropic.Beta.Messages.BetaMessageParam[], text: string): Anthropic.Beta.Messages.BetaMessageParam[] {
@@ -1003,12 +1004,13 @@ export async function handleAiConversation(
 
   // Cliente respondeu só com o número de um item da última lista enviada: resolve por código,
   // sem depender da IA (número virava o produto com esse dígito no nome, ou "erro").
+  let menuPickNote = "";
   if (draft.lastMenu?.length && !draft.finalizedOrderId) {
-    const picks = parseMenuPicks(text, draft.lastMenu.length);
-    if (picks) {
+    const lastMenu = draft.lastMenu;
+    const addPicks = async (nums: number[]): Promise<string[]> => {
       const names: string[] = [];
-      for (const n of picks) {
-        const item = draft.lastMenu.find((m) => m.n === n)!;
+      for (const n of nums) {
+        const item = lastMenu.find((m) => m.n === n)!;
         const product = await prisma.product.findFirst({ where: { id: item.productId, tenantId, available: true } });
         if (!product) continue;
         const price = product.promoPriceCents ?? product.priceCents;
@@ -1017,11 +1019,30 @@ export async function handleAiConversation(
         else draft.cart.push({ productId: product.id, name: product.name, unitPriceCents: price, quantity: 1 });
         names.push(product.name);
       }
+      return names;
+    };
+    const picks = parseMenuPicks(text, lastMenu.length);
+    if (picks) {
+      const names = await addPicks(picks);
       if (names.length > 0) {
         const reply = `Anotado: *${names.join("* e *")}* ✅ Subtotal ${brl(draftTotal(draft))}.\nQuer mais alguma coisa? Se for só isso, me diz: *entrega* ou *retirada*?`;
         data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
         await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
         return [reply];
+      }
+    } else if (text.includes("\n")) {
+      // "4" + "Um sem salsicha" juntos (mensagens seguidas): a IA tratava o conjunto como dúvida e não
+      // registrava o combo (carrinho vazio, 4 de 4 testes). O número da lista é resolvido por código; o
+      // resto da mensagem segue pra IA, já com o item no carrinho.
+      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+      const pickLines = lines.filter((l) => parseMenuPicks(l, lastMenu.length));
+      const restLines = lines.filter((l) => !parseMenuPicks(l, lastMenu.length));
+      if (pickLines.length > 0 && restLines.length > 0) {
+        const names = await addPicks(pickLines.flatMap((l) => parseMenuPicks(l, lastMenu.length) ?? []));
+        if (names.length > 0) {
+          menuPickNote = `\n\nO cliente escolheu na lista ${names.map((n) => `"${n}"`).join(" e ")} — o sistema JÁ ADICIONOU ao carrinho (veja o estado). Não adicione de novo; responda só ao restante da mensagem dele e siga o pedido.`;
+          text = restLines.join("\n");
+        }
       }
     }
   }
@@ -1270,7 +1291,7 @@ export async function handleAiConversation(
     idleHours >= 2 && draft.cart.length > 0
       ? `\n\nO cliente ficou cerca de ${Math.round(idleHours)}h sem responder e voltou agora; o carrinho acima é de antes. Se a mensagem dele deixar claro que continua esse pedido (ex.: "sim" à pergunta da equipe ou sua, "pode seguir"), siga normalmente de onde parou. Se for vaga ou falar de outra coisa, confirme em UMA frase se ele ainda quer esse pedido antes de avançar.`
       : "";
-  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText) + resumeNote;
+  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText) + resumeNote + menuPickNote;
   const system: Anthropic.Beta.Messages.BetaTextBlockParam[] = [
     {
       type: "text",
