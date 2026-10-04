@@ -40,7 +40,9 @@ ESTILO:
 - Nunca repita saudação, regras ou informação que o cliente já recebeu.
 - Formatação de WhatsApp: *negrito* com um asterisco de cada lado (nunca **dois**), sem markdown de título, lista ou código.
 - Tom neutro e educado — nunca imite gíria, sotaque, palavrão ou jeito de falar do cliente.
-- Responda só com a mensagem pro cliente. NUNCA escreva comentários sobre o que você conferiu ou corrigiu: nada de "o estado mostra...", "o rascunho diz...", "deixa eu corrigir", "o total está errado", "resultado da ação". Se algo estava errado, simplesmente escreva a versão certa.
+- FORMATO DE SAÍDA OBRIGATÓRIO: escreva a mensagem pro cliente dentro de <mensagem> e </mensagem> e NADA fora dessas tags. Tudo que estiver fora das tags é descartado. Dentro das tags vai só o texto que o cliente lê — nunca fale do cliente em terceira pessoa ("o cliente não mencionou...").
+- Se o cliente mandou uma IMAGEM (anexada abaixo), olhe a imagem: ela faz parte da pergunta ("tá válida essa promoção?" sobre uma foto de anúncio). Responda sobre o que aparece nela usando só o CARDÁPIO e os FATOS DA LOJA; nunca diga que o cliente "não mencionou" o assunto.
+- NUNCA escreva comentários sobre o que você conferiu ou corrigiu: nada de "o estado mostra...", "o rascunho diz...", "deixa eu corrigir", "o total está errado", "resultado da ação". Se algo estava errado, simplesmente escreva a versão certa.
 
 Exemplos do tom certo (só referência de estilo; cada caso real tem dados diferentes):
 - "Show! Adicionei o combo 3 aqui 🍔 Vai ser entrega ou retirada?"
@@ -67,6 +69,8 @@ export interface ComposeReplyInput {
   /** A resposta anterior do bot, só pra não repetir nem responder de novo o que já foi respondido. */
   previousBotReply: string;
   isFirstReply: boolean;
+  /** Imagem que o cliente mandou neste turno — o Redator precisa vê-la, senão responde só pela legenda. */
+  image?: { mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp"; base64: string };
 }
 
 export interface ComposeReplyResult {
@@ -113,7 +117,17 @@ Escreva agora a mensagem final pro cliente.`;
         { type: "text", text: REDATOR_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
         { type: "text", text: `FATOS DA LOJA:\n${input.storeFacts}\n\nCARDÁPIO (única fonte da verdade sobre itens, ingredientes e preços):\n${stripCatalogIds(input.catalogText)}`, cache_control: { type: "ephemeral" } },
       ],
-      messages: [{ role: "user", content: userText }],
+      messages: [
+        {
+          role: "user",
+          content: input.image
+            ? [
+                { type: "image", source: { type: "base64", media_type: input.image.mediaType, data: input.image.base64 } },
+                { type: "text", text: userText },
+              ]
+            : userText,
+        },
+      ],
     },
     { timeout: CALL_TIMEOUT_MS, maxRetries: 1 },
   );
@@ -125,11 +139,25 @@ Escreva agora a mensagem final pro cliente.`;
     cacheReadInputTokens: response.usage.cache_read_input_tokens ?? undefined,
   };
 
-  const text = response.content
+  const raw = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text.trim())
     .filter(Boolean)
     .join("\n\n");
 
+  const text = extractMessage(raw);
   return { replies: text ? [text] : [], usage };
+}
+
+/**
+ * O que o cliente lê é só o que está dentro de <mensagem>: raciocínio escrito antes
+ * ("O cliente não mencionou...") fica de fora. Sem tags (modelo ignorou o formato), devolve o texto
+ * inteiro e o filtro de comentário interno do chamador faz o resto.
+ */
+export function extractMessage(raw: string): string {
+  const closed = raw.match(/<mensagem>([\s\S]*?)<\/mensagem>/i);
+  if (closed) return closed[1].trim();
+  const open = raw.match(/<mensagem>([\s\S]*)$/i);
+  if (open) return open[1].trim();
+  return raw.replace(/<\/?mensagem>/gi, "").trim();
 }

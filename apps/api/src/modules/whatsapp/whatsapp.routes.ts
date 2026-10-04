@@ -220,8 +220,32 @@ interface WebhookBody {
       locationMessage?: { degreesLatitude?: number; degreesLongitude?: number };
       imageMessage?: WaRawImageMessage;
       audioMessage?: { seconds?: number; ptt?: boolean; mimetype?: string };
+      /** Carrinho enviado pelo catálogo do WhatsApp Business (só traz contagem e total, não a lista de itens). */
+      orderMessage?: { itemCount?: number; orderTitle?: string; message?: string; totalAmount1000?: number | string };
+      /** Produto do catálogo compartilhado pelo cliente. */
+      productMessage?: { product?: { title?: string; description?: string; priceAmount1000?: number | string } };
     };
   };
+}
+
+/**
+ * Carrinho/produto do catálogo do WhatsApp chega sem texto e era ignorado em silêncio. Vira uma linha
+ * pro bot responder em cima — o produto vem com título (a IA casa com o cardápio); o carrinho só vem
+ * com quantidade e total, então a IA pede pro cliente dizer os itens.
+ */
+function catalogMessageText(message: NonNullable<NonNullable<WebhookBody["data"]>["message"]> | undefined): string {
+  const brl = (thousandths: number | string | undefined) => {
+    const n = Number(thousandths);
+    return Number.isFinite(n) && n > 0 ? ` (R$ ${(n / 1000).toFixed(2).replace(".", ",")})` : "";
+  };
+  const product = message?.productMessage?.product;
+  if (product?.title) return `[Cliente abriu o produto "${product.title}" do catálogo do WhatsApp${brl(product.priceAmount1000)}]`;
+  const order = message?.orderMessage;
+  if (order) {
+    const count = order.itemCount ? `${order.itemCount} item(ns)` : "itens";
+    return `[Cliente enviou um carrinho do catálogo do WhatsApp com ${count}${brl(order.totalAmount1000)}. A lista dos itens NÃO chegou — peça pra ele dizer quais são e as quantidades.]`;
+  }
+  return "";
 }
 
 /** Espera antes de responder no modo IA, pra juntar mensagens picadas do cliente. */
@@ -335,6 +359,7 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
   const image = img?.url && img?.mediaKey ? { ...img, messageId: body.data?.key?.id } : undefined;
   // Legenda da foto vira o texto da mensagem (o bot lê a imagem junto com ela).
   let text = body.data?.message?.conversation ?? body.data?.message?.extendedTextMessage?.text ?? (image ? img?.caption ?? "" : "");
+  if (!text.trim() && !location && !image) text = catalogMessageText(body.data?.message);
   // Áudio: com GEMINI_API_KEY transcreve e segue o fluxo normal como se o cliente tivesse escrito;
   // sem chave (ou se falhar) só registra e pede pra escrever.
   let audioTranscript: string | null = null;

@@ -17,7 +17,7 @@ import { isStoreOpenNow, nowInStoreTimezone } from "../../utils/storeTime.js";
 import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET, AI_MODEL_EXECUTOR } from "../ai/anthropic-client.js";
 import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
 import type { TokenUsage } from "../ai/pricing.js";
-import { composeReply } from "./redator.service.js";
+import { composeReply, type ComposeReplyInput } from "./redator.service.js";
 import { classifyReplyToQuestion } from "./reply-intent.service.js";
 import { parseSodaRules, canonicalBrand, comboSodaSize, sizeRule, buildSodaPolicyText, SIZE_LABEL } from "./soda-rules.js";
 import { parseExtras, findExtra, buildExtrasPolicyText, MAX_EXTRA_PER_UNIT } from "./extras.js";
@@ -737,7 +737,7 @@ export function guardSodaBrand(customerText: string, replies: string[], nextStep
  * O Redator já escreveu pro cliente a conferência que ele fez do rascunho ("O estado mostra que...",
  * "deixa eu corrigir", "como diz o rascunho"). Tira essas frases; o resto da mensagem continua valendo.
  */
-const META_LEAK_RE = /\brascunho\b|\bdeixa eu corrigir\b|\bcorrigindo:|\bo estado (mostra|confirma|ainda mostra|indica|atual)\b|\bresultado da a[cç][aã]o\b|\ba[cç][oõ]es registradas\b|\bnota interna\b|\banota[cç][aã]o interna\b|\bferramenta\b/i;
+const META_LEAK_RE = /\brascunho\b|\bdeixa eu corrigir\b|\bcorrigindo:|\bo estado (mostra|confirma|ainda mostra|indica|atual)\b|\bresultado da a[cç][aã]o\b|\ba[cç][oõ]es registradas\b|\bnota interna\b|\banota[cç][aã]o interna\b|\bferramenta\b|\b[oa] cliente\b|\bo estado\b|\bn[aã]o h[aá] informa[cç][aã]o\b|\bn[aã]o mencionou\b/i;
 export function stripMetaCommentary(text: string): string {
   if (!META_LEAK_RE.test(text)) return text;
   return text
@@ -1495,12 +1495,14 @@ export async function handleAiConversation(
   // Imagem: baixa do WhatsApp e manda pro modelo junto com a legenda. Sem conseguir
   // baixar, pede pro cliente escrever em vez de fingir que viu.
   let userContent: string | Anthropic.Beta.Messages.BetaContentBlockParam[] = text;
+  let redatorImage: ComposeReplyInput["image"];
   if (image) {
     const base64 = await waTransport.downloadImage(instanceNameFor(tenantId), image);
     if (!base64) {
       return ["Não consegui abrir a sua imagem agora 😕 Me conta por escrito o que você quer que eu te ajudo!"];
     }
     const mime = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(image.mimetype ?? "") ? (image.mimetype as "image/jpeg" | "image/png" | "image/gif" | "image/webp") : "image/jpeg";
+    redatorImage = { mediaType: mime, base64 };
     userContent = [
       { type: "image", source: { type: "base64", media_type: mime, data: base64 } },
       { type: "text", text: text.trim() || "(O cliente enviou só esta imagem, sem texto.)" },
@@ -1638,6 +1640,7 @@ export async function handleAiConversation(
         customerMessage: text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : ""),
         previousBotReply: prevAssistantText,
         isFirstReply: firstTurn,
+        image: redatorImage,
       });
       // O Redator já escreveu pro cliente a própria conferência ("o estado mostra...", "como diz o rascunho"):
       // tira essas frases; se não sobrar nada, vale o rascunho do Executor.
@@ -1650,6 +1653,10 @@ export async function handleAiConversation(
       console.error("[ai-conversation] Redator falhou, enviando o rascunho do Executor:", err);
     }
   }
+
+  // Mesma trava no rascunho do Executor (V1 ou Redator indisponível): nunca mandar raciocínio interno.
+  const sanitized = replies.map(stripMetaCommentary).filter(Boolean);
+  replies = sanitized.length > 0 ? sanitized : [nextStepPrompt(draft)];
 
   // true quando um passo abaixo já deixou no histórico o texto que o cliente realmente recebeu.
   let historySynced = false;
