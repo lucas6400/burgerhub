@@ -20,6 +20,7 @@ import type { TokenUsage } from "../ai/pricing.js";
 import { composeReply } from "./redator.service.js";
 import { classifyReplyToQuestion } from "./reply-intent.service.js";
 import { parseSodaRules, canonicalBrand, comboSodaSize, sizeRule, buildSodaPolicyText, SIZE_LABEL } from "./soda-rules.js";
+import { parseExtras, findExtra, buildExtrasPolicyText, MAX_EXTRA_PER_UNIT } from "./extras.js";
 
 /**
  * Modo beta: a IA conduz a conversa inteira do pedido (sem menu numerado),
@@ -35,7 +36,7 @@ import { parseSodaRules, canonicalBrand, comboSodaSize, sizeRule, buildSodaPolic
  * saudação, "entrega", "pix", "sim", localização, horário, status ficam no Haiku. Se
  * ANTHROPIC_MODEL_EXECUTOR estiver definida, vale ela pra todo turno.
  */
-const CART_WORK_RE = /\b(muda\w*|troc(a|ar|aria|ado|ou)|troque\w*|tir[ae]\w*|remov\w*|sem|adicion\w*|acrescent\w*|inclu\w*|somente|apenas|no lugar|ao inv[eé]s|em vez|mais um|mais uma|outro|outra|combo\w*|x[\s-]?(tudo|bacon|salada|calabresa|casa)|casa 63|refri\w*|coca|guaran\w*|pepsi|lata|bebida|dois|duas|tr[eê]s|quatro|cinco|\d+\s*x|x\s*\d+)\b/i;
+const CART_WORK_RE = /\b(muda\w*|troc(a|ar|aria|ado|ou)|troque\w*|tir[ae]\w*|remov\w*|sem|adicion\w*|acrescent\w*|inclu\w*|somente|apenas|no lugar|ao inv[eé]s|em vez|mais um|mais uma|outro|outra|combo\w*|x[\s-]?(tudo|bacon|salada|calabresa|casa)|casa 63|refri\w*|coca|guaran\w*|pepsi|lata|bebida|adicional\w*|extra\w*|catupiry|mu[cs]arela|mussarela|presunto|cebola|milho|batata|bacon|ovo|salsicha|calabresa|dois|duas|tr[eê]s|quatro|cinco|\d+\s*x|x\s*\d+)\b/i;
 // Só pedir a lista/cardápio ("quais os combos?") não mexe no carrinho.
 const MENU_QUESTION_RE = /\b(quais|card[aá]pio|lista|op[cç][oõ]es)\b/i;
 function pickExecutorModel(customerText: string): string {
@@ -57,6 +58,8 @@ interface DraftCartItem {
   notes?: string;
   /** Marca do refri escolhida em combo (set_combo_soda): quantas unidades de cada marca e o acréscimo por unidade. */
   sodas?: { brand: string; count: number; extraCents: number }[];
+  /** Adicionais (bacon extra, ovo...) desta linha: `byUnit[u]` = quantos desse adicional a unidade u do item leva. */
+  extras?: { name: string; priceCents: number; byUnit: number[] }[];
 }
 
 interface OrderDraft {
@@ -93,35 +96,85 @@ function emptyData(): AiConversationData {
   return { draft: { cart: [] }, history: [] };
 }
 
-/** Acréscimo da marca de refri escolhida no combo (ex.: Coca), somado por unidade que a pediu. */
+/** Acréscimos da linha: marca de refri especial no combo (ex.: Coca) + adicionais (bacon extra, ovo...). */
 function lineExtraCents(i: DraftCartItem): number {
-  return (i.sodas ?? []).reduce((s, g) => s + g.count * g.extraCents, 0);
+  return (i.sodas ?? []).reduce((s, g) => s + g.count * g.extraCents, 0) + (i.extras ?? []).reduce((s, e) => s + e.priceCents * e.byUnit.reduce((a, n) => a + n, 0), 0);
 }
 
 function draftTotal(draft: OrderDraft) {
   return draft.cart.reduce((s, i) => s + i.unitPriceCents * i.quantity + lineExtraCents(i), 0) + (draft.deliveryFeeCents ?? 0);
 }
 
-/** Nome do item pro cliente/IA, com a marca do refri do combo quando foi escolhida. */
+/** Nome do item pro cliente/IA, com a marca do refri do combo e os adicionais quando existem. */
 function cartLabel(i: DraftCartItem): string {
   const sodas = i.sodas ?? [];
-  if (sodas.length === 0) return i.name;
-  const tag = sodas.map((g) => (i.quantity > 1 ? `${g.count}x ${g.brand}` : g.brand)).join(", ");
-  return `${i.name} (refri: ${tag}${lineExtraCents(i) > 0 ? `, +${brl(lineExtraCents(i))}` : ""})`;
+  const extras = i.extras ?? [];
+  if (sodas.length === 0 && extras.length === 0) return i.name;
+  const parts = [
+    ...(sodas.length > 0 ? [`refri: ${sodas.map((g) => (i.quantity > 1 ? `${g.count}x ${g.brand}` : g.brand)).join(", ")}`] : []),
+    ...extras.map((e) => {
+      const total = e.byUnit.reduce((a, n) => a + n, 0);
+      const units = e.byUnit.flatMap((n, idx) => (n > 0 ? [idx + 1] : []));
+      return `+ ${total > 1 ? `${total}x ` : ""}${e.name}${i.quantity > 1 ? ` [unid. ${units.join(",")}]` : ""}`;
+    }),
+  ];
+  const extra = lineExtraCents(i);
+  return `${i.name} (${parts.join("; ")}${extra > 0 ? `, acréscimo ${brl(extra)}` : ""})`;
 }
 
-/** Tira marcas a mais quando a quantidade do combo diminuiu. */
-function clampSodas(i: DraftCartItem): void {
-  if (!i.sodas) return;
-  let room = i.quantity;
-  i.sodas = i.sodas
-    .map((g) => {
-      const count = Math.min(g.count, room);
-      room -= count;
-      return { ...g, count };
-    })
-    .filter((g) => g.count > 0);
-  if (i.sodas.length === 0) i.sodas = undefined;
+/** Tira marcas e adicionais a mais quando a quantidade do item diminuiu. */
+function clampLineExtras(i: DraftCartItem): void {
+  if (i.sodas) {
+    let room = i.quantity;
+    i.sodas = i.sodas
+      .map((g) => {
+        const count = Math.min(g.count, room);
+        room -= count;
+        return { ...g, count };
+      })
+      .filter((g) => g.count > 0);
+    if (i.sodas.length === 0) i.sodas = undefined;
+  }
+  if (i.extras) {
+    i.extras = i.extras
+      .map((e) => ({ ...e, byUnit: Array.from({ length: i.quantity }, (_, idx) => e.byUnit[idx] ?? 0) }))
+      .filter((e) => e.byUnit.some((n) => n > 0));
+    if (i.extras.length === 0) i.extras = undefined;
+  }
+}
+
+/**
+ * Divide a linha do carrinho em itens de pedido com o mesmo "pacote" de refri/adicionais: marcas de refri ocupam as
+ * primeiras unidades e cada adicional vai só pras unidades em que foi pedido (byUnit).
+ * Ex.: 2 X-Tudo, um com Bacon e o outro com Ovo → [1 "X-Tudo (+ Bacon)", 1 "X-Tudo (+ Ovo)"].
+ */
+function expandLine(i: DraftCartItem): { quantity: number; extraCents: number; variantLabel?: string }[] {
+  const q = Math.max(1, i.quantity);
+  const units = Array.from({ length: q }, () => ({ brand: undefined as string | undefined, brandCents: 0, extras: new Map<string, { priceCents: number; n: number }>() }));
+  let u = 0;
+  for (const g of i.sodas ?? []) {
+    for (let k = 0; k < g.count && u < q; k++, u++) {
+      units[u].brand = g.brand;
+      units[u].brandCents = g.extraCents;
+    }
+  }
+  for (const e of i.extras ?? []) {
+    units.forEach((unit, idx) => {
+      const n = e.byUnit[idx] ?? 0;
+      if (n > 0) unit.extras.set(e.name, { priceCents: e.priceCents, n });
+    });
+  }
+  const groups = new Map<string, { quantity: number; extraCents: number; variantLabel?: string }>();
+  for (const unit of units) {
+    const list = [...unit.extras.entries()];
+    const variantLabel = [unit.brand, ...list.map(([name, x]) => `+ ${x.n > 1 ? `${x.n}x ` : ""}${name}`)].filter(Boolean).join(", ") || undefined;
+    const extraCents = unit.brandCents + list.reduce((s, [, x]) => s + x.n * x.priceCents, 0);
+    const key = `${variantLabel ?? ""}|${extraCents}`;
+    const group = groups.get(key);
+    if (group) group.quantity += 1;
+    else groups.set(key, { quantity: 1, extraCents, variantLabel });
+  }
+  return [...groups.values()];
 }
 
 function formatAddress(address: OrderDraft["address"]): string {
@@ -356,6 +409,7 @@ function buildStaticSystemBlock(
   generalDeliveryInfo: string,
   acceptsDineIn: boolean,
   sodaPolicy: string | null,
+  extrasPolicy: string | null,
 ): string {
   return `Você é a atendente virtual da hamburgueria "${tenantName}" no WhatsApp. Conduza a conversa inteira do pedido em português do Brasil, de forma natural e calorosa, sem menu numerado — o cliente fala o que quer como falaria com um atendente de verdade.
 
@@ -412,7 +466,8 @@ Regras importantes:
 - ONDE FICAMOS: quando o cliente perguntar onde a loja fica / endereço / como chegar, chame send_store_location (envia o pino do mapa) e escreva só uma frase curta com o endereço.
 - ALTERAÇÃO DE PEDIDO EM ANDAMENTO (tirar ingrediente, alergia, trocar item): chame request_order_change com a alteração COMPLETA, e chame DE NOVO sempre que o cliente acrescentar/esclarecer algo. NUNCA diga que a equipe "está ciente" ou que "avisou" sem ter chamado a ferramenta NESTA resposta. Se for alergia, trate como urgente e peça só o que falta (qual item), uma pergunta por vez.
 - Se o cliente tem PEDIDO EM ANDAMENTO (veja o estado do pedido), perguntas como "vai demorar?", "cadê meu pedido?" ou "já saiu?" respondem com o status REAL informado lá — nunca invente prazo. Se já passou do tempo estimado, peça desculpa e diga que a equipe está acompanhando a entrega. Nunca passe telefone do entregador: diga que a equipe avisa quando ele chegar.
-- ITEM FORA DO CARDÁPIO (cremes, sobremesas, lanche kids, qualquer coisa que não esteja na lista acima): diga com educação que não tem no cardápio. NUNCA ofereça como se existisse, nem diga "consigo", "posso pedir pra cozinha" ou "vou adicionar". Se o cliente insistir, diga que vai confirmar com a equipe.
+${extrasPolicy ? `- ${extrasPolicy}
+` : ""}- ITEM FORA DO CARDÁPIO (cremes, sobremesas, lanche kids, qualquer coisa que não esteja na lista acima): diga com educação que não tem no cardápio. NUNCA ofereça como se existisse, nem diga "consigo", "posso pedir pra cozinha" ou "vou adicionar". Se o cliente insistir, diga que vai confirmar com a equipe.
 - Quando o cliente mandar várias mensagens seguidas com mais de uma pergunta, responda TODAS (uma frase curta pra cada), sem esquecer nenhuma. Se ele só pedir pra aguardar ("só um instante"), responda curto e simpático, sem repetir o pedido nem puxar a venda.
 - REGISTRE ANTES DE RESPONDER: quando o cliente pedir um item, trocar ou tirar algo, você DEVE chamar update_cart_item NESTA resposta — nunca escreva "boa escolha", "adicionei", "anotei" nem o preço como se já estivesse no pedido sem ter chamado a ferramenta (já aconteceu de o pedido seguir pro pagamento com o carrinho vazio). Depois de chamar, confira o "Carrinho agora" que a ferramenta devolveu: se ainda tiver o item que o cliente mandou trocar/tirar, remova-o (quantity 0) antes de responder. Ao pedir pra trocar de combo, o antigo SAI e o novo ENTRA.
 - Número no meio de uma frase é QUANTIDADE, não posição da lista: "2 x tudo + refri 1L" são 2 X-Tudo (combo de 2), nunca o item nº 2 da lista. Só uma mensagem que seja SÓ o número ("4") é posição da lista.
@@ -836,17 +891,12 @@ async function runFinalize(
     changeForCents: draft.changeForCents,
     customer: { name: pushName || `Cliente ${phone.slice(-4)}`, phone },
     address: draft.address,
-    // Combo com marca de refri escolhida vira uma linha por marca (a Coca soma R$ por unidade no preço do
-    // item e aparece no nome — "2 X Tudo + refrigerante 1L (Coca)" — pra cozinha e pro ticket).
-    items: draft.cart.flatMap((i) => {
-      const sodas = i.sodas ?? [];
-      if (sodas.length === 0) return [{ productId: i.productId, quantity: i.quantity, notes: i.notes }];
-      const rest = i.quantity - sodas.reduce((s, g) => s + g.count, 0);
-      return [
-        ...sodas.map((g) => ({ productId: i.productId, quantity: g.count, notes: i.notes, extraCents: g.extraCents, variantLabel: g.brand })),
-        ...(rest > 0 ? [{ productId: i.productId, quantity: rest, notes: i.notes }] : []),
-      ];
-    }),
+    // Item com marca de refri especial e/ou adicionais vira uma linha por "pacote" (a Coca e os adicionais somam
+    // R$ no preço do item e aparecem no nome — "2 X Tudo + refrigerante 1L (Coca)", "X - Tudo (+ Bacon)" — pra
+    // cozinha e pro ticket).
+    items: draft.cart.flatMap((i) =>
+      expandLine(i).map((g) => ({ productId: i.productId, quantity: g.quantity, notes: i.notes, extraCents: g.extraCents || undefined, variantLabel: g.variantLabel })),
+    ),
   });
 
   draft.finalizedOrderId = order.id;
@@ -908,6 +958,7 @@ export async function handleAiConversation(
       isOpenOverride: boolean | null;
       aiPipelineV2Enabled: boolean;
       sodaRules?: unknown;
+      botExtras?: unknown;
       acceptsDineIn: boolean;
     };
     businessHours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
@@ -947,6 +998,8 @@ export async function handleAiConversation(
   const draft = data.draft;
   // Regras de refri da loja (marcas por tamanho + acréscimo da Coca no combo); nulo = regra antiga (nunca promete marca).
   const sodaRules = parseSodaRules(tenant.settings.sodaRules);
+  // Adicionais que o bot vende em hambúrguer/combo (bacon extra, ovo...); nulo = o bot não vende adicional.
+  const extras = parseExtras(tenant.settings.botExtras);
   const cartWasEmpty = draft.cart.length === 0;
   const prevAssistantText = lastAssistantText(data.history);
   const firstTurn = data.history.length === 0;
@@ -1130,7 +1183,7 @@ export async function handleAiConversation(
       if (existing) {
         existing.quantity = quantity;
         existing.unitPriceCents = price;
-        clampSodas(existing);
+        clampLineExtras(existing);
         if (notes) existing.notes = notes;
       } else {
         draft.cart.push({ productId, name: product.name, unitPriceCents: price, quantity, notes: notes ?? undefined });
@@ -1175,6 +1228,36 @@ export async function handleAiConversation(
       const extra = lineExtraCents(line);
       const comboTotal = line.unitPriceCents * line.quantity + extra;
       return `Refri do combo definido: ${line.quantity > 1 ? `${units}x ` : ""}${brand}. ${extra > 0 ? `Acréscimo de ${brl(extra)}.` : "Sem acréscimo."} ${line.quantity}x ${line.name} agora custa ${brl(comboTotal)} no total. Total do pedido: ${brl(draftTotal(draft))}. Diga o valor novo ao cliente.`;
+    },
+  });
+
+  // Adicionais (bacon extra, ovo...) em hambúrguer/combo que já está no carrinho. O preço vem da lista da loja
+  // (botExtras) — a IA só escolhe o adicional e a quantidade; nunca digita valor.
+  const setItemExtra = betaZodTool({
+    name: "set_item_extra",
+    description: "Define um adicional (bacon extra, ovo, catupiry...) num hambúrguer ou combo que já está no carrinho: `count` por unidade-alvo, em `unit` (uma unidade específica) ou em todas (unit null). count 0 remove. O sistema calcula o valor e devolve o preço novo do item.",
+    inputSchema: z.object({
+      productId: z.string().describe("O id do hambúrguer ou combo que está no carrinho."),
+      extra: z.string().describe("Nome do adicional, como na lista de ADICIONAIS."),
+      count: z.number().int().min(0).max(MAX_EXTRA_PER_UNIT).describe("Quantas unidades desse adicional cada unidade-alvo do item leva (0 remove)."),
+      unit: z.number().int().min(1).max(50).nullable().describe("Qual unidade do item recebe (1, 2...) — quando o item tem mais de uma unidade e o adicional é só pra uma. null = todas as unidades."),
+    }),
+    run: async ({ productId, extra: rawExtra, count, unit }) => {
+      if (!extras) throw new Error("Esta loja não vende adicionais pelo bot.");
+      const line = draft.cart.find((i) => i.productId === productId);
+      if (!line) throw new Error("Esse item não está no carrinho — adicione antes com update_cart_item.");
+      const product = await prisma.product.findFirst({ where: { id: productId, tenantId }, select: { category: { select: { name: true } } } });
+      if (!/hamb|combo|lanche/i.test(product?.category.name ?? "")) throw new Error("Adicional só vale em hambúrguer e combo.");
+      const option = findExtra(extras, rawExtra);
+      if (!option) throw new Error(`Esse adicional não existe. Opções: ${extras.map((e) => `${e.name} (${brl(e.priceCents)})`).join(", ")}. Diga isso ao cliente.`);
+      if (unit !== null && unit > line.quantity) throw new Error(`Esse item tem só ${line.quantity} unidade(s) — não existe a unidade ${unit}.`);
+      const current = line.extras?.find((e) => e.name === option.name)?.byUnit ?? [];
+      const byUnit = Array.from({ length: line.quantity }, (_, idx) => (unit === null || unit - 1 === idx ? count : (current[idx] ?? 0)));
+      const others = (line.extras ?? []).filter((e) => e.name !== option.name);
+      const next = byUnit.some((n) => n > 0) ? [...others, { name: option.name, priceCents: option.priceCents, byUnit }] : others;
+      line.extras = next.length > 0 ? next : undefined;
+      const lineTotal = line.unitPriceCents * line.quantity + lineExtraCents(line);
+      return `${count > 0 ? `Adicional definido: ${count}x ${option.name} (${brl(option.priceCents)} cada) ${unit === null ? (line.quantity > 1 ? "em todas as unidades" : "") : `só na unidade ${unit}`}` : `Adicional ${option.name} removido`}. ${line.quantity}x ${cartLabel(line)} agora custa ${brl(lineTotal)} no total. Total do pedido: ${brl(draftTotal(draft))}. Diga o valor novo ao cliente.`;
     },
   });
 
@@ -1354,7 +1437,7 @@ export async function handleAiConversation(
     },
   });
 
-  const tools = [updateCartItem, repeatLastOrder, requestOrderChange, setFulfillmentType, setDeliveryAddress, checkDeliveryArea, setPaymentMethod, sendPixKey, sendStoreLocation, sendMenu, useLastAddress, finalizeOrder, ...(sodaRules ? [setComboSoda] : [])];
+  const tools = [updateCartItem, repeatLastOrder, requestOrderChange, setFulfillmentType, setDeliveryAddress, checkDeliveryArea, setPaymentMethod, sendPixKey, sendStoreLocation, sendMenu, useLastAddress, finalizeOrder, ...(sodaRules ? [setComboSoda] : []), ...(extras ? [setItemExtra] : [])];
 
   const hours = hoursText(tenant.businessHours);
   const openNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours });
@@ -1399,10 +1482,11 @@ export async function handleAiConversation(
     });
     sodaPolicy = buildSodaPolicyText(sodaRules, beverages.map((p) => ({ name: p.name, priceCents: p.promoPriceCents ?? p.priceCents })));
   }
+  const extrasPolicy = extras ? buildExtrasPolicyText(extras) : null;
   const system: Anthropic.Beta.Messages.BetaTextBlockParam[] = [
     {
       type: "text",
-      text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo, tenant.settings.acceptsDineIn, sodaPolicy),
+      text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo, tenant.settings.acceptsDineIn, sodaPolicy, extrasPolicy),
       cache_control: { type: "ephemeral" },
     },
     { type: "text", text: dynamicStateText + staffContext },
@@ -1540,6 +1624,7 @@ export async function handleAiConversation(
           `Entrega: ${generalDeliveryInfo}`,
           "Pagamento (Pix, cartão de crédito/débito e dinheiro): feito na entrega ou na retirada, direto com o entregador ou no balcão. A chave Pix só é enviada pelo sistema se o cliente pedir pra pagar na hora — nunca prometa mandar a chave.",
           sodaPolicy ?? "Refrigerante: a marca/sabor depende do estoque do dia; a loja manda o que tiver.",
+          ...(extrasPolicy ? [extrasPolicy] : []),
           "Promoção: os COMBOS do cardápio SÃO as promoções da loja — nunca diga que não tem promoção.",
           "Aviso de entrega: a EQUIPE avisa o cliente pelo WhatsApp quando o pedido sai pra entrega e quando o entregador chega. Só diga que o entregador saiu/está a caminho se o ESTADO mostrar esse status.",
           "Recado/referência de endereço do cliente (ex.: \"portão azul\"): só diga que foi repassado se aparecer nas AÇÕES REGISTRADAS; senão diga que vai confirmar com a equipe.",

@@ -141,6 +141,9 @@ model TenantSettings {
   // Regras de refrigerante do bot de IA (marcas por tamanho + acréscimo da marca especial no combo —
   // ver whatsapp/soda-rules.ts). Nulo = regra antiga: o bot nunca promete marca.
   sodaRules Json?
+  // Adicionais que o bot vende em hambúrguer e combo (bacon extra, ovo...): lista { name, priceCents }.
+  // Ficam só no bot (não são produtos nem adicionais do cardápio digital). Nulo = o bot não vende adicional.
+  botExtras Json?
   // API oficial da Meta (Cloud API) — alternativa ao Evolution/QR acima, cada
   // tenant conecta o PRÓPRIO número via Embedded Signup (sem QR code). Até a
   // BurgerHub ter o App/Business verificados na Meta, waProvider fica sempre
