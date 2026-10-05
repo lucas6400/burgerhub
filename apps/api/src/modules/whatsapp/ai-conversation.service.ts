@@ -17,7 +17,7 @@ import { isStoreOpenNow, nowInStoreTimezone } from "../../utils/storeTime.js";
 import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET, AI_MODEL_EXECUTOR } from "../ai/anthropic-client.js";
 import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
 import type { TokenUsage } from "../ai/pricing.js";
-import { composeReply, type ComposeReplyInput } from "./redator.service.js";
+import { composeReply, pickRedatorModel, type ComposeReplyInput } from "./redator.service.js";
 import { classifyReplyToQuestion } from "./reply-intent.service.js";
 import { parseSodaRules, canonicalBrand, comboSodaSize, sizeRule, buildSodaPolicyText, SIZE_LABEL } from "./soda-rules.js";
 import { parseExtras, findExtra, buildExtrasPolicyText, MAX_EXTRA_PER_UNIT } from "./extras.js";
@@ -39,10 +39,25 @@ import { parseExtras, findExtra, buildExtrasPolicyText, MAX_EXTRA_PER_UNIT } fro
 const CART_WORK_RE = /\b(muda\w*|troc(a|ar|aria|ado|ou)|troque\w*|tir[ae]\w*|remov\w*|sem|adicion\w*|acrescent\w*|inclu\w*|somente|apenas|no lugar|ao inv[eé]s|em vez|mais um|mais uma|outro|outra|combo\w*|x[\s-]?(tudo|bacon|salada|calabresa|casa)|casa 63|refri\w*|coca|guaran\w*|pepsi|lata|bebida|adicional\w*|extra\w*|catupiry|mu[cs]arela|mussarela|presunto|cebola|milho|batata|bacon|ovo|salsicha|calabresa|dois|duas|tr[eê]s|quatro|cinco|\d+\s*x|x\s*\d+)\b/i;
 // Só pedir a lista/cardápio ("quais os combos?") não mexe no carrinho.
 const MENU_QUESTION_RE = /\b(quais|card[aá]pio|lista|op[cç][oõ]es)\b/i;
+const THANKS_ONLY_RE = /^\s*(muito |mto |bem )?obrigad[oa]s?( mesmo)?[\s!.,]*(🙏|😊|❤️|👍)*\s*$/i;
+const PICKUP_WORD_RE = /\b(retirada|retirar|retiro|buscar|busco|balc[aã]o)\b/i;
+/** Mensagem curta que escolhe retirada (e não pergunta nada nem fala de entrega). */
+export function isPickupMessage(text: string): boolean {
+  const t = text.trim();
+  return t.length > 0 && t.length <= 40 && PICKUP_WORD_RE.test(t) && !/\?|\b(entrega\w*|tem|d[aá] pra|posso|como|onde|moto)\b/i.test(t);
+}
+
+/**
+ * Mensagem pré-preenchida do anúncio ("Quero pedir o combo de 2 X-Tudo + Guaraná 1L por R$50."): é a metade
+ * das conversas e só adiciona o combo citado — casaria com CART_WORK_RE (combo, x-tudo, refri) e mandaria
+ * toda abertura de anúncio pro Sonnet. O resto da mensagem (se o cliente escreveu mais) ainda é avaliado.
+ */
+const AD_OPENING_RE = /(?:boa (?:noite|tarde|dia)[!,.]?\s*)?quero pedir o combo de [^\n.!?]*[.!]?/gi;
 function pickExecutorModel(customerText: string): string {
   if (AI_MODEL_EXECUTOR) return AI_MODEL_EXECUTOR;
-  if (MENU_QUESTION_RE.test(customerText) && !/\bquero\b/i.test(customerText)) return AI_MODEL_HAIKU;
-  return CART_WORK_RE.test(customerText) ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
+  const text = customerText.replace(AD_OPENING_RE, " ");
+  if (MENU_QUESTION_RE.test(text) && !/\bquero\b/i.test(text)) return AI_MODEL_HAIKU;
+  return CART_WORK_RE.test(text) ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
 }
 const MAX_ITERATIONS = 8;
 const MAX_HISTORY_TURNS = 8;
@@ -777,6 +792,22 @@ function syncFinalAssistantText(history: Anthropic.Beta.Messages.BetaMessagePara
 }
 
 /** "hoje às 18:30" / "amanhã às 18:30" / "domingo às 18:30" — próxima abertura pelo horário cadastrado. */
+/**
+ * Loja fechada À FORÇA (botão "Fechado" do painel) mas ainda dentro do horário cadastrado: o dono pausou os
+ * pedidos novos (ex.: cozinha sobrecarregada). Dizer "abrimos amanhã" nesse caso era falso — já aconteceu às 23:15
+ * numa loja que fecha 23:30.
+ */
+function isPausedByOwner(settings: { isOpenOverride: boolean | null }, hours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[]): boolean {
+  return settings.isOpenOverride === false && isStoreOpenNow({ businessHours: hours });
+}
+
+/** Aviso de loja fechada pro cliente; o motivo (pausa do dono × fora do horário) muda o texto. */
+function storeClosedNotice(settings: { isOpenOverride: boolean | null }, hours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[]): string {
+  return isPausedByOwner(settings, hours)
+    ? "⏰ Só um aviso: no momento a loja não está recebendo novos pedidos. Mas já posso anotar o seu pra gente preparar assim que voltar! 😊"
+    : `⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(hours)}. Mas já posso anotar seu pedido pra gente preparar assim que abrir! 😊`;
+}
+
 function nextOpeningText(hours: { weekday: number; openTime: string; closed?: boolean }[]): string {
   const { weekday, hhmm } = nowInStoreTimezone();
   const days = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
@@ -807,7 +838,7 @@ function menuLine(draft: OrderDraft): string {
   return `\n\nÚLTIMA LISTA NUMERADA ENVIADA AO CLIENTE (o número que ele mandar é a posição aqui): ${draft.lastMenu.map((m) => `${m.n}=${m.name}`).join("; ")}. Só vale como posição da lista uma mensagem que seja SÓ o número (ex.: "4"); "2 x tudo + refri" é QUANTIDADE (2 unidades do X Tudo), nunca o item nº 2.`;
 }
 
-function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOrders: string, lastOrder: string): string {
+function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOrders: string, lastOrder: string, paused: boolean): string {
   // Recalculado a cada mensagem (não fica no bloco estático/cacheado) — a
   // loja pode abrir/fechar no meio de uma conversa longa, e a IA nunca deve
   // adivinhar isso só pelo texto do horário cadastrado.
@@ -818,7 +849,14 @@ function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOr
     : draft.finalizedOrderId
       ? ""
       : "\n\nSTATUS DO PEDIDO (verdade absoluta): NENHUM pedido deste cliente foi enviado à cozinha ainda. NUNCA diga que está confirmado, na fila, sendo preparado, saindo, a caminho ou \"vindo\" — isso só vale depois que finalize_order devolver o número do pedido. O pedido só é feito quando o cliente confirmar o resumo e você chamar finalize_order.";
-  const openLine = `Agora é ${days[weekday]}, ${hhmm} (horário da loja). A loja está ${isOpenNow ? "ABERTA" : "FECHADA"} neste exato momento — use isso pra responder se dá pra pedir agora, nunca calcule você mesmo a partir do texto do horário.${activeLine}`;
+  const closedRule = isOpenNow
+    ? ""
+    : activeOrders
+      ? " Este cliente JÁ TEM pedido em andamento: NUNCA diga a ele que a loja está fechada nem que o pedido só sai quando abrir — o pedido dele segue normal; fale só do pedido."
+      : paused
+        ? " A loja está DENTRO do horário, mas pausou novos pedidos por ora: diga que no momento não está recebendo pedidos novos; NUNCA diga que abre amanhã."
+        : "";
+  const openLine = `Agora é ${days[weekday]}, ${hhmm} (horário da loja). A loja está ${isOpenNow ? "ABERTA" : "FECHADA"} neste exato momento — use isso pra responder se dá pra pedir agora, nunca calcule você mesmo a partir do texto do horário.${closedRule}${activeLine}`;
 
   if (draft.cart.length === 0 && !draft.type && !draft.paymentMethod) {
     const postSale = activeOrders
@@ -991,7 +1029,7 @@ export async function handleAiConversation(
   // recomeçar o atendimento com boas-vindas de novo (já aconteceu de virar bagunça pro lead).
   if (
     wasFinalized &&
-    /^\s*(ok(ay)?|blz|beleza|certo|show|top|valeu|obg|obrigad[oa]s?( mesmo)?|de nada|isso( mesmo)?|tá bom|ta bom|delici(a|oso)|(muito |bem )?bom|[oó]timo|excelente|adorei|amei|perfeito|chegou( certin[ho]o)?|receb[ie]|combinado|fechado|flw|falou|até (mais|logo|a próxima)|👍+|🙏+|❤️+|😊+|🥰+|😋+|🍔+)[\s!.,]*$/i.test(text)
+    /^\s*(ok(ay)?|blz|beleza|certo|show|top|valeu|obg|(muito |mto )?obrigad[oa]s?( mesmo)?|de nada|isso( mesmo)?|tá bom|ta bom|delici(a|oso)|(muito |bem )?bom|[oó]timo|excelente|adorei|amei|perfeito|chegou( certin[ho]o)?|receb[ie]|combinado|fechado|flw|falou|até (mais|logo|a próxima)|👍+|🙏+|❤️+|😊+|🥰+|😋+|🍔+)[\s!.,]*$/i.test(text)
   ) {
     return [];
   }
@@ -1002,11 +1040,19 @@ export async function handleAiConversation(
   const extras = parseExtras(tenant.settings.botExtras);
   const cartWasEmpty = draft.cart.length === 0;
   const prevAssistantText = lastAssistantText(data.history);
-  const firstTurn = data.history.length === 0;
+  // Logo depois de fechar um pedido a sessão é zerada, mas a conversa NÃO é nova: sem o wasFinalized aqui,
+  // o "muito obrigada" do cliente virava "primeiro contato" (boas-vindas e aviso de loja fechada de novo).
+  const firstTurn = data.history.length === 0 && !wasFinalized;
   // O cliente aceitou o que o bot acabou de perguntar? ("sim", "quero", "com certeza", "bora"...) — entende a
   // resposta NO CONTEXTO da pergunta; calculado só se algum passo precisar, e uma vez por turno.
   let acceptanceCache: boolean | undefined;
-  const customerAccepted = async (): Promise<boolean> => (acceptanceCache ??= (await classifyReplyToQuestion(tenantId, prevAssistantText, text)) === "accept");
+  // Só agradecer ("muito obrigada") não é aceitar a pergunta: já fechou pedido sem o cliente confirmar.
+  const customerAccepted = async (): Promise<boolean> =>
+    (acceptanceCache ??= !THANKS_ONLY_RE.test(text) && (await classifyReplyToQuestion(tenantId, prevAssistantText, text)) === "accept");
+
+  // "Retirada" / "busco no balcão" soltos: o Haiku às vezes só responde e NÃO chama set_fulfillment_type — o pedido
+  // seguia como entrega (taxa cobrada, ticket errado) ou ficava sem tipo e o bot perguntava de novo. Registra por código.
+  if (draft.cart.length > 0 && draft.type !== "PICKUP" && isPickupMessage(text)) draft.type = "PICKUP";
 
   // Localização compartilhada pelo WhatsApp: calcula a taxa real na hora, sem
   // depender da IA reconhecer coordenadas dentro de uma mensagem de texto.
@@ -1073,9 +1119,8 @@ export async function handleAiConversation(
   // mesmo pedido de antes, e um "sim" remonta tudo — inclusive o endereço — sem repetir perguntas.
   if (!draft.finalizedOrderId && draft.cart.length === 0 && !draft.type) {
     const flat = text.replace(/\s+/g, " ").trim();
-    const closedPrefix = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours })
-      ? ""
-      : `⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(tenant.businessHours)}. Mas já posso anotar seu pedido! 😊\n\n`;
+    const storeOpenNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours });
+    const closedPrefix = storeOpenNow || (await getActiveOrdersText(tenantId, phone)) ? "" : `${storeClosedNotice(tenant.settings, tenant.businessHours)}\n\n`;
     if (draft.offeredRepeat && !CHANGE_INTENT_RE.test(flat) && (await customerAccepted())) {
       draft.offeredRepeat = undefined;
       await repeatLastOrderInto(tenantId, phone, draft, true);
@@ -1472,7 +1517,7 @@ export async function handleAiConversation(
     idleHours >= 2 && draft.cart.length > 0
       ? `\n\nO cliente ficou cerca de ${Math.round(idleHours)}h sem responder e voltou agora; o carrinho acima é de antes. Se a mensagem dele deixar claro que continua esse pedido (ex.: "sim" à pergunta da equipe ou sua, "pode seguir"), siga normalmente de onde parou. Se for vaga ou falar de outra coisa, confirme em UMA frase se ele ainda quer esse pedido antes de avançar.`
       : "";
-  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText) + resumeNote + menuPickNote;
+  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText, isPausedByOwner(tenant.settings, tenant.businessHours)) + resumeNote + menuPickNote;
   // Texto das regras de refri montado do cardápio real (preços avulsos) — o mesmo vai pro Executor e pro Redator.
   let sodaPolicy: string | null = null;
   if (sodaRules) {
@@ -1616,6 +1661,9 @@ export async function handleAiConversation(
   let replies: string[] = texts.length > 0 ? texts : [nextStepPrompt(draft)];
   if (pipelineV2) {
     try {
+      const turnActions = extractTurnActions(turnMessages);
+      const customerMessage = text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : "");
+      const redatorModel = pickRedatorModel({ turnActions, customerMessage, image: redatorImage });
       const composed = await composeReply({
         tenantName: tenant.name,
         catalogText: catalog,
@@ -1634,20 +1682,21 @@ export async function handleAiConversation(
         ].join("\n"),
         stateText: dynamicStateText,
         draftReply: texts.join("\n\n"),
-        turnActions: extractTurnActions(turnMessages),
+        turnActions,
         // Só o que o cliente mandou NESTE turno: passar as últimas mensagens antigas fazia o
         // Redator responder de novo perguntas que o bot já tinha respondido.
-        customerMessage: text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : ""),
+        customerMessage,
         previousBotReply: prevAssistantText,
         isFirstReply: firstTurn,
         image: redatorImage,
+        model: redatorModel,
       });
       // O Redator já escreveu pro cliente a própria conferência ("o estado mostra...", "como diz o rascunho"):
       // tira essas frases; se não sobrar nada, vale o rascunho do Executor.
       const composedClean = composed.replies.map(stripMetaCommentary).filter(Boolean);
       if (composed.replies.some((r) => META_LEAK_RE.test(r))) console.error("[ai-conversation] Redator vazou comentário interno — removido.", { tenantId, phone, original: composed.replies.join(" ").slice(0, 300) });
       if (composedClean.length > 0) replies = composedClean;
-      background(logAiUsage(tenantId, "conversation_redator" satisfies AiUsagePurpose, AI_MODEL_SONNET, composed.usage));
+      background(logAiUsage(tenantId, "conversation_redator" satisfies AiUsagePurpose, composed.model, composed.usage));
     } catch (err) {
       // O rascunho do Executor já é uma resposta válida pro cliente — melhor que uma pergunta genérica.
       console.error("[ai-conversation] Redator falhou, enviando o rascunho do Executor:", err);
@@ -1660,6 +1709,9 @@ export async function handleAiConversation(
 
   // true quando um passo abaixo já deixou no histórico o texto que o cliente realmente recebeu.
   let historySynced = false;
+  // Aviso de loja fechada: só no primeiro contato e só se o cliente NÃO tem pedido em andamento.
+  const showClosedNotice = !openNow && firstTurn && !activeOrders;
+  let closedNoticeSent = false;
 
   // Primeira resposta a quem já chegou com um item na mão (clique de anúncio): o modelo
   // costuma responder só "entrega ou retirada?" — troca pelo texto que já convida à
@@ -1668,9 +1720,10 @@ export async function handleAiConversation(
   // ("quero o de 65" depois de ver o cardápio) a resposta normal da IA é a certa, sem repetir boas-vindas.
   if (firstTurn && cartWasEmpty && draft.cart.length > 0 && !draft.type && replies.length === 1 && replies[0].length < 240 && /entrega/i.test(replies[0]) && /retirad/i.test(replies[0])) {
     const intro = await buildAdIntro(tenantId, tenant.name, draft);
-    if (!openNow) intro.head = `⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(tenant.businessHours)}. Mas já posso anotar seu pedido pra gente preparar assim que abrir! 😊
-
-${intro.head}`;
+    if (showClosedNotice) {
+      intro.head = `${storeClosedNotice(tenant.settings, tenant.businessHours)}\n\n${intro.head}`;
+      closedNoticeSent = true;
+    }
     const fullText = `${intro.head}
 
 ${intro.tail}`;
@@ -1696,8 +1749,9 @@ ${intro.tail}`;
   }
 
   // Loja fechada: no primeiro contato o cliente PRECISA saber, mesmo que a IA esqueça de avisar.
-  if (!openNow && firstTurn && !replies.some((r) => /fechad/i.test(r))) {
-    replies = [`⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(tenant.businessHours)}. Mas já posso anotar seu pedido pra gente preparar assim que abrir! 😊`, ...replies];
+  // Uma vez só por turno, e nunca pra quem já tem pedido em andamento (o pedido dele segue normal).
+  if (showClosedNotice && !closedNoticeSent && !replies.some((r) => /fechad|n[aã]o est[aá] recebendo/i.test(r))) {
+    replies = [storeClosedNotice(tenant.settings, tenant.businessHours), ...replies];
   }
 
   // Rede de segurança: já aconteceu de a IA NARRAR "pedido confirmado" sem ter

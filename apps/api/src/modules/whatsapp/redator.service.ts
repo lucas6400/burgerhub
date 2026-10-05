@@ -1,5 +1,5 @@
 import { Anthropic } from "@anthropic-ai/sdk";
-import { getAnthropicClient, AI_MODEL_SONNET } from "../ai/anthropic-client.js";
+import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET } from "../ai/anthropic-client.js";
 import type { TokenUsage } from "../ai/pricing.js";
 
 const CALL_TIMEOUT_MS = 9_000;
@@ -30,7 +30,7 @@ CONFERÊNCIA (faça antes de escrever):
 - O ESTADO é a verdade sobre o carrinho: se o rascunho diz que removeu/trocou/adicionou algo mas o ESTADO mostra outra coisa (ex.: o combo antigo ainda está no carrinho), NÃO repita a afirmação do rascunho: diga o que realmente está no pedido agora e pergunte se é isso. Corrija em silêncio, sem explicar a diferença.
 - O pedido só está feito quando a ferramenta finalize_order aparece nas AÇÕES REGISTRADAS (com o número do pedido no resultado) ou o ESTADO mostra PEDIDO EM ANDAMENTO. Se o ESTADO diz que nenhum pedido foi enviado à cozinha, NUNCA diga que o pedido está confirmado, na fila, sendo preparado, saindo, a caminho ou "vindo" — nem com outras palavras. Se o pedido está completo no ESTADO mas finalize_order NÃO rodou neste turno, termine com o resumo completo e a pergunta "Posso confirmar?".
 - Quando o rascunho traz o RESUMO do pedido pedindo confirmação (itens, total, entrega/retirada, forma de pagamento), mantenha o resumo completo e correto — nunca encurte pra só "posso confirmar?". Essa é a única mensagem que pode passar de 3 frases.
-- Consumo no local/mesas: responda conforme os FATOS DA LOJA quando o cliente perguntar; fora isso, não mencione. Loja aberta/fechada: use o ESTADO; não repita o aviso de loja fechada se NÃO for a primeira resposta da conversa, a menos que o cliente pergunte do horário ou esteja fechando o pedido.
+- Consumo no local/mesas: responda conforme os FATOS DA LOJA quando o cliente perguntar; fora isso, não mencione. Loja aberta/fechada: use o ESTADO; não repita o aviso de loja fechada se NÃO for a primeira resposta da conversa, a menos que o cliente pergunte do horário ou esteja fechando o pedido. Se o ESTADO mostra PEDIDO EM ANDAMENTO deste cliente, NUNCA diga que a loja está fechada nem que o pedido só sai quando abrir: o pedido dele segue normal. Se o ESTADO diz que a loja pausou novos pedidos, nunca diga que ela "abre amanhã".
 - Nunca diga que não dá pra anotar/registrar o pedido: o que o ESTADO mostra como registrado está registrado, e com a loja fechada o pedido é preparado quando ela abrir.
 - Nunca invente preço, endereço, chave Pix, prazo ou qualquer dado fora do CARDÁPIO, do ESTADO e do rascunho conferido. Não escreva código/chave Pix: se precisar, ele vai separado.
 
@@ -71,11 +71,28 @@ export interface ComposeReplyInput {
   isFirstReply: boolean;
   /** Imagem que o cliente mandou neste turno — o Redator precisa vê-la, senão responde só pela legenda. */
   image?: { mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp"; base64: string };
+  /** Modelo deste turno (ver pickRedatorModel); sem isso, Sonnet. */
+  model?: string;
 }
 
 export interface ComposeReplyResult {
   replies: string[];
   usage: TokenUsage;
+  model: string;
+}
+
+/** Ferramentas que mexem no pedido: o texto final cita item, preço e prazo, então a conferência precisa do modelo forte. */
+const ORDER_CHANGING_ACTION_RE = /\b(update_cart_item|set_combo_soda|set_item_extra|finalize_order|request_order_change|repeat_last_order|use_last_address)\b/;
+const CUSTOMER_QUESTION_RE = /\?|\b(quanto|qual|quais|como|onde|quando|quem|tem|vem|leva|pode|aceita|faz|fazem|entrega|cancel\w*|troc\w*|tira\w*|sem)\b/i;
+
+/**
+ * Sonnet só quando o turno pede conferência de verdade (o pedido mudou, o cliente perguntou algo ou mandou imagem);
+ * nos turnos mecânicos (forma de pagamento, tipo de entrega, "sim", localização) o Haiku reescreve igual por ~1/3 do preço.
+ */
+export function pickRedatorModel(input: Pick<ComposeReplyInput, "turnActions" | "customerMessage" | "image">): string {
+  if (input.image) return AI_MODEL_SONNET;
+  if (input.turnActions.some((a) => ORDER_CHANGING_ACTION_RE.test(a))) return AI_MODEL_SONNET;
+  return CUSTOMER_QUESTION_RE.test(input.customerMessage) ? AI_MODEL_SONNET : AI_MODEL_HAIKU;
 }
 
 /** O Redator não chama ferramentas, então os ids internos do cardápio só gastariam tokens. */
@@ -105,9 +122,10 @@ ${input.draftReply.trim() || "(o assistente não escreveu rascunho: escreva a pr
 
 Escreva agora a mensagem final pro cliente.`;
 
+  const model = input.model ?? AI_MODEL_SONNET;
   const response = await getAnthropicClient().messages.create(
     {
-      model: AI_MODEL_SONNET,
+      model,
       // 300 cortava resumo de pedido no meio da frase (pego ao vivo) — resumo com vários itens precisa de mais espaço.
       max_tokens: 600,
       // Esse modelo pensa por padrão e o raciocínio conta no max_tokens: respostas saíam cortadas
@@ -146,7 +164,7 @@ Escreva agora a mensagem final pro cliente.`;
     .join("\n\n");
 
   const text = extractMessage(raw);
-  return { replies: text ? [text] : [], usage };
+  return { replies: text ? [text] : [], usage, model };
 }
 
 /**
