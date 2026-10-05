@@ -21,6 +21,23 @@ import { composeReply, pickRedatorModel, type ComposeReplyInput } from "./redato
 import { classifyReplyToQuestion } from "./reply-intent.service.js";
 import { parseSodaRules, canonicalBrand, comboSodaSize, sizeRule, buildSodaPolicyText, SIZE_LABEL } from "./soda-rules.js";
 import { parseExtras, findExtra, buildExtrasPolicyText, MAX_EXTRA_PER_UNIT } from "./extras.js";
+import {
+  alertComplaint,
+  alertProofReceived,
+  alertTeam,
+  alertTeamPromise,
+  applyLocationToActiveOrder,
+  detectSplitPayment,
+  extractDeliveryReference,
+  findActiveOrder,
+  handleHumanRequest,
+  isComplaint,
+  isHumanRequest,
+  noteOnOrderAndAlert,
+  PAYMENT_CONFIRMED_CLAIM_RE,
+  PROOF_SAFE_REPLY,
+  TEAM_PROMISE_RE,
+} from "./escalation.service.js";
 
 /**
  * Modo beta: a IA conduz a conversa inteira do pedido (sem menu numerado),
@@ -100,6 +117,12 @@ interface OrderDraft {
   offeredRepeat?: boolean;
   /** Transiente: texto do cardápio montado por send_menu, enviado como mensagem própria. */
   pendingMenuText?: string;
+  /** Combo escolhido na lista quando o carrinho já tem outro: espera o cliente dizer se TROCA ou SOMA. */
+  pendingComboPick?: { productId: string; name: string; unitPriceCents: number };
+  /** Cliente pediu pagamento dividido ("20 no dinheiro e o resto no Pix"): vai nas observações do pedido e avisa a equipe. */
+  paymentSplitNote?: string;
+  /** Referência de endereço / recado pro entregador ("portão cinza"): vai no endereço do pedido. */
+  deliveryRef?: string;
 }
 
 interface AiConversationData {
@@ -487,7 +510,9 @@ ${extrasPolicy ? `- ${extrasPolicy}
 - REGISTRE ANTES DE RESPONDER: quando o cliente pedir um item, trocar ou tirar algo, você DEVE chamar update_cart_item NESTA resposta — nunca escreva "boa escolha", "adicionei", "anotei" nem o preço como se já estivesse no pedido sem ter chamado a ferramenta (já aconteceu de o pedido seguir pro pagamento com o carrinho vazio). Depois de chamar, confira o "Carrinho agora" que a ferramenta devolveu: se ainda tiver o item que o cliente mandou trocar/tirar, remova-o (quantity 0) antes de responder. Ao pedir pra trocar de combo, o antigo SAI e o novo ENTRA.
 - Número no meio de uma frase é QUANTIDADE, não posição da lista: "2 x tudo + refri 1L" são 2 X-Tudo (combo de 2), nunca o item nº 2 da lista. Só uma mensagem que seja SÓ o número ("4") é posição da lista.
 - Referência de endereço ou recado pro entregador ("portão azul", "ao lado da papelaria", "liga quando chegar"): se já existe pedido em andamento, chame request_order_change com o texto; se ainda é só o carrinho, registre em notes do primeiro item (update_cart_item, ex.: "REF. ENTREGA: portão azul"). NUNCA diga "vou repassar pro entregador" ou "anotei o endereço" sem ter registrado.
-- Nunca comente nem explique o que aparece em outros apps (iFood etc.) e nunca diga que vai mandar a chave Pix: ela só sai pelo sistema quando o cliente pedir pra pagar na hora. Pagamento dividido entre formas (metade Pix, metade cartão) ou vale-alimentação: não recuse nem aceite por conta própria — diga que vai confirmar com a equipe e siga o pedido.
+- Nunca comente nem explique o que aparece em outros apps (iFood etc.) e nunca diga que vai mandar a chave Pix: ela só sai pelo sistema quando o cliente pedir pra pagar na hora. Pagamento dividido entre formas (ex.: 20 no dinheiro e o resto no Pix): o SISTEMA já registra no pedido e avisa a equipe — diga que anotou do jeito que o cliente falou e que a equipe confirma com ele; nunca diga que não dá pra dividir. Vale-alimentação: diga que vai confirmar com a equipe e siga o pedido.
+- PERSONALIZAÇÃO ou pedido especial que o cardápio não cobre (lanche simplificado como "só pão, carne e queijo", montar de outro jeito, condição especial): NUNCA diga "não temos", "não fazemos" nem "não dá" — a equipe às vezes faz. Chame ask_team com o pedido do cliente e diga que vai confirmar com a equipe e já retorna.
+- COMPROVANTE (imagem de Pix/transferência): você NÃO confere pagamento. Diga só que recebeu o comprovante e que a equipe confere — NUNCA "Pix recebido", "pagamento confirmado" ou "caiu".
 - Se o cliente perguntar se avisamos quando o pedido sair: diga que SIM, a equipe avisa pelo WhatsApp quando sai pra entrega e quando o entregador chega.
 - TIRAR INGREDIENTE ("sem salsicha", "tira o presunto", "um sem ovo"): confira a descrição daquele lanche no CARDÁPIO. Se o ingrediente existe, registre em notes do item (update_cart_item, ex.: "SEM presunto em 1 unidade") e siga o pedido na mesma resposta, sem travar a venda. Se NÃO existe mas tem um parecido ("salsicha" → calabresa), pergunte em UMA frase curta se é esse que ele quer tirar ("O X-Tudo não leva salsicha, mas leva calabresa — é a calabresa que você quer tirar?"). Se não existe nada parecido, diga que o lanche já vem sem aquilo. NUNCA diga que o cliente está enganado, "pensando em outro lanche" ou que o lanche não tem ingredientes que ele tem, e nunca recite a lista inteira de ingredientes. Em combo de vários lanches, "um sem X" = SÓ UMA unidade sem X (registre assim).`;
 }
@@ -874,7 +899,7 @@ Subtotal + taxa: ${brl(draftTotal(draft))}
 Tipo: ${draft.type ?? "não definido"}
 Endereço: ${draft.type === "DELIVERY" ? formatAddress(draft.address) : "N/A"}
 Taxa de entrega: ${draft.type === "DELIVERY" ? fee : "N/A"}
-Forma de pagamento: ${draft.paymentMethod ?? "não definida"}${menuLine(draft)}`;
+Forma de pagamento: ${draft.paymentMethod ?? "não definida"}${draft.paymentSplitNote ? `\nPAGAMENTO DIVIDIDO pedido pelo cliente: "${draft.paymentSplitNote}" — o sistema JÁ ANOTOU isso no pedido e a equipe confirma com ele. Diga que anotou assim; NUNCA diga que "não dá pra dividir" nem que já está confirmado.` : ""}${draft.deliveryRef ? `\nREFERÊNCIA/RECADO DE ENTREGA já registrado no pedido: "${draft.deliveryRef}" — pode dizer que anotou; não pergunte de novo.` : ""}${menuLine(draft)}`;
 }
 
 async function runFinalize(
@@ -927,8 +952,9 @@ async function runFinalize(
     type: draft.type,
     paymentMethod: useOnlinePix ? "ONLINE" : draft.paymentMethod,
     changeForCents: draft.changeForCents,
+    notes: draft.paymentSplitNote ? `💳 PAGAMENTO DIVIDIDO (confirmar com o cliente): ${draft.paymentSplitNote}` : undefined,
     customer: { name: pushName || `Cliente ${phone.slice(-4)}`, phone },
-    address: draft.address,
+    address: draft.address ? { ...draft.address, reference: draft.deliveryRef } : undefined,
     // Item com marca de refri especial e/ou adicionais vira uma linha por "pacote" (a Coca e os adicionais somam
     // R$ no preço do item e aparecem no nome — "2 X Tudo + refrigerante 1L (Coca)", "X - Tudo (+ Bacon)" — pra
     // cozinha e pro ticket).
@@ -938,6 +964,10 @@ async function runFinalize(
   });
 
   draft.finalizedOrderId = order.id;
+  // Pagamento dividido não cabe no campo único de forma de pagamento: a equipe precisa saber ANTES do entregador sair.
+  if (draft.paymentSplitNote) {
+    background(alertTeam(tenantId, `💳 *Pedido #${order.number} com PAGAMENTO DIVIDIDO*\n📱 ${phone}\n✏️ Cliente disse: "${draft.paymentSplitNote}"\nConfirme com ele quanto vai em cada forma — o pedido está registrado como ${draft.paymentMethod ?? "?"}.`));
+  }
   const cartBeforeClear = draft.cart;
   draft.cart = [];
 
@@ -1033,7 +1063,22 @@ export async function handleAiConversation(
   ) {
     return [];
   }
+  // Cliente pediu um ATENDENTE: o bot não insiste em "consigo te ajudar com tudo" — avisa a equipe com o contexto,
+  // fica calado nessa conversa e responde na hora (sem número de alerta configurado, a IA segue atendendo).
+  if (isHumanRequest(text)) {
+    const handoff = await handleHumanRequest(tenantId, phone, pushName, text);
+    if (handoff) return handoff;
+  }
+  // Reclamação / estorno / ameaça: o bot continua respondendo, mas o dono é avisado na hora.
+  if (isComplaint(text)) background(alertComplaint(tenantId, phone, pushName, text));
+
   const draft = data.draft;
+  // Cliente com pedido de ENTREGA em andamento que manda um pino novo (e não está montando outro pedido): é a
+  // correção do endereço — grava no pedido e avisa a equipe, em vez de recomeçar o atendimento.
+  if (location && draft.cart.length === 0) {
+    const updated = await applyLocationToActiveOrder(tenantId, phone, location);
+    if (updated) return updated;
+  }
   // Regras de refri da loja (marcas por tamanho + acréscimo da Coca no combo); nulo = regra antiga (nunca promete marca).
   const sodaRules = parseSodaRules(tenant.settings.sodaRules);
   // Adicionais que o bot vende em hambúrguer/combo (bacon extra, ovo...); nulo = o bot não vende adicional.
@@ -1053,6 +1098,29 @@ export async function handleAiConversation(
   // "Retirada" / "busco no balcão" soltos: o Haiku às vezes só responde e NÃO chama set_fulfillment_type — o pedido
   // seguia como entrega (taxa cobrada, ticket errado) ou ficava sem tipo e o bot perguntava de novo. Registra por código.
   if (draft.cart.length > 0 && draft.type !== "PICKUP" && isPickupMessage(text)) draft.type = "PICKUP";
+
+  // Pagamento dividido, referência de endereço e comprovante são registrados por CÓDIGO (a IA já anotou "vou repassar" e
+  // esqueceu): com pedido em andamento vai pras observações do pedido + alerta da equipe; com o carrinho ainda aberto
+  // fica no rascunho e entra no pedido ao finalizar.
+  const split = detectSplitPayment(text);
+  const deliveryRef = draft.type === "PICKUP" ? null : extractDeliveryReference(text);
+  // true quando o sistema já anotou no pedido e avisou a equipe neste turno — evita o 2º alerta da ferramenta da IA.
+  let systemNotified = false;
+  if (split || deliveryRef || image) {
+    const activeOrder = draft.cart.length === 0 ? await findActiveOrder(tenantId, phone) : null;
+    if (activeOrder) {
+      systemNotified = !!(split || deliveryRef);
+      if (split) await noteOnOrderAndAlert(tenantId, phone, activeOrder, "💳 PAGAMENTO DIVIDIDO pedido pelo cliente", split.note);
+      if (deliveryRef) await noteOnOrderAndAlert(tenantId, phone, activeOrder, "🏠 RECADO/REFERÊNCIA DE ENTREGA", deliveryRef, { reference: deliveryRef });
+      if (image) await alertProofReceived(tenantId, phone, activeOrder);
+    } else {
+      if (split && !draft.paymentSplitNote) {
+        draft.paymentSplitNote = split.note;
+        draft.paymentMethod ??= split.main;
+      }
+      if (deliveryRef && !draft.deliveryRef?.includes(deliveryRef)) draft.deliveryRef = [draft.deliveryRef, deliveryRef].filter(Boolean).join(" | ");
+    }
+  }
 
   // Localização compartilhada pelo WhatsApp: calcula a taxa real na hora, sem
   // depender da IA reconhecer coordenadas dentro de uma mensagem de texto.
@@ -1117,10 +1185,11 @@ export async function handleAiConversation(
 
   // Cliente que JÁ PEDIU antes: em vez de "o que você quer?" (ou "não entendi" num "?"), oferece o
   // mesmo pedido de antes, e um "sim" remonta tudo — inclusive o endereço — sem repetir perguntas.
-  if (!draft.finalizedOrderId && draft.cart.length === 0 && !draft.type) {
+  // Não oferece "o mesmo de antes" a quem JÁ TEM pedido em andamento (já aconteceu com o #144 ainda na fila).
+  if (!draft.finalizedOrderId && draft.cart.length === 0 && !draft.type && !(await getActiveOrdersText(tenantId, phone))) {
     const flat = text.replace(/\s+/g, " ").trim();
     const storeOpenNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours });
-    const closedPrefix = storeOpenNow || (await getActiveOrdersText(tenantId, phone)) ? "" : `${storeClosedNotice(tenant.settings, tenant.businessHours)}\n\n`;
+    const closedPrefix = storeOpenNow ? "" : `${storeClosedNotice(tenant.settings, tenant.businessHours)}\n\n`;
     if (draft.offeredRepeat && !CHANGE_INTENT_RE.test(flat) && (await customerAccepted())) {
       draft.offeredRepeat = undefined;
       await repeatLastOrderInto(tenantId, phone, draft, true);
@@ -1150,6 +1219,25 @@ export async function handleAiConversation(
     }
   }
 
+  // Resposta ao "trocar ou somar?" do combo escolhido na lista (ver comboConflict abaixo).
+  if (draft.pendingComboPick && !draft.finalizedOrderId) {
+    const pending = draft.pendingComboPick;
+    draft.pendingComboPick = undefined;
+    const flat = text.toLowerCase();
+    const wantsSwap = /\b(troc\w*|no lugar|em vez|ao inv[eé]s|substitu\w*|s[oó] (o|esse|essa)|apenas|somente)\b/.test(flat);
+    const wantsBoth = /\b(somar|soma|somando|os dois|juntos?|ambos|mais esse|tamb[eé]m)\b/.test(flat);
+    const product = wantsSwap !== wantsBoth ? await prisma.product.findFirst({ where: { id: pending.productId, tenantId, available: true } }) : null;
+    if (product) {
+      if (wantsSwap) draft.cart = draft.cart.filter((c) => !c.name.includes("+"));
+      draft.cart.push({ productId: product.id, name: product.name, unitPriceCents: product.promoPriceCents ?? product.priceCents, quantity: 1 });
+      const reply = `${wantsSwap ? "Troquei" : "Somei"}! ✅ *${product.name}* — Subtotal ${brl(draftTotal(draft))}.\n${nextStepPrompt(draft)}`;
+      data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
+      await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
+      return [reply];
+    }
+    // Resposta que não é "trocar" nem "somar": a escolha pendente expira e a IA segue a conversa normal.
+  }
+
   // Cliente respondeu só com o número de um item da última lista enviada: resolve por código,
   // sem depender da IA (número virava o produto com esse dígito no nome, ou "erro").
   let menuPickNote = "";
@@ -1170,7 +1258,24 @@ export async function handleAiConversation(
       return names;
     };
     const picks = parseMenuPicks(text, lastMenu.length);
-    if (picks) {
+    // Combo escolhido na lista quando o carrinho JÁ TEM outro combo (o do anúncio, geralmente): somar os dois sem
+    // perguntar virou R$170 no lugar de R$90. Aqui não adiciona — a IA pergunta se troca ou soma.
+    const comboConflict = (nums: number[]) => {
+      if (nums.length !== 1) return null;
+      const item = lastMenu.find((m) => m.n === nums[0]);
+      if (!item || !item.name.includes("+")) return null;
+      const inCart = draft.cart.filter((c) => c.name.includes("+") && c.productId !== item.productId);
+      return inCart.length > 0 ? { item, inCart: inCart.map((c) => `${c.quantity}x ${c.name}`).join(" + ") } : null;
+    };
+    const conflict = picks ? comboConflict(picks) : null;
+    if (picks && conflict) {
+      // O código pergunta (a IA se atrapalhava com a dúvida) e guarda o item até o cliente responder "trocar" ou "somar".
+      draft.pendingComboPick = { productId: conflict.item.productId, name: conflict.item.name, unitPriceCents: conflict.item.unitPriceCents };
+      const reply = `Você já tem *${conflict.inCart}* no pedido. Quer *trocar* por *${conflict.item.name}* (${brl(conflict.item.unitPriceCents)}) ou *somar* os dois?`;
+      data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
+      await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
+      return [reply];
+    } else if (picks) {
       const names = await addPicks(picks);
       if (names.length > 0) {
         const reply = `Anotado: *${names.join("* e *")}* ✅ Subtotal ${brl(draftTotal(draft))}.\nQuer mais alguma coisa? Se for só isso, me diz: *entrega* ou *retirada*?`;
@@ -1404,6 +1509,7 @@ export async function handleAiConversation(
   let changeNotified = false;
   const notifyOrderChange = async (request: string): Promise<string> => {
     changeNotified = true;
+    if (systemNotified) return "A equipe JÁ foi avisada pelo sistema e o recado/pagamento já está anotado no pedido. Diga ao cliente que anotou e que a equipe confirma em instantes — não chame esta ferramenta de novo para o mesmo assunto.";
     const order = await prisma.order.findFirst({
       where: {
         tenantId,
@@ -1414,12 +1520,14 @@ export async function handleAiConversation(
       orderBy: { createdAt: "desc" },
       select: { id: true, notes: true },
     });
-    if (order) {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: { notes: [order.notes, `⚠️ ALTERAÇÃO PEDIDA PELO CLIENTE: ${request}`].filter(Boolean).join("\n") },
-      });
-    }
+    // Sem pedido feito ainda não há o que "alterar": o carrinho/rascunho já é o que vale, e alertar a equipe de uma
+    // "alteração" de pedido que não existe só gera ruído.
+    if (!order) changeNotified = false;
+    if (!order) return "Ainda não existe pedido confirmado deste cliente — NÃO há o que avisar à equipe. Ajuste o carrinho com update_cart_item (observação em notes) e siga o atendimento.";
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { notes: [order.notes, `⚠️ ALTERAÇÃO PEDIDA PELO CLIENTE: ${request}`].filter(Boolean).join("\n") },
+    });
     const settings = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { orderAlertPhone: true } });
     const active = await getActiveOrdersText(tenantId, phone);
     if (!settings?.orderAlertPhone) return "A equipe será avisada pelo painel (o cliente já está na conversa). Diga que a equipe vai confirmar a alteração em instantes.";
@@ -1434,6 +1542,21 @@ export async function handleAiConversation(
     description: "Avisa a equipe da loja que o cliente quer ALTERAR um pedido que já está em andamento (trocar/adicionar item, mudar endereço ou pagamento). Você não altera pedido já feito — só avisa a equipe e diz ao cliente que ela vai confirmar.",
     inputSchema: z.object({ request: z.string().min(3).max(400).describe("A alteração COMPLETA que o cliente quer (com todos os detalhes já ditos: qual item, o que tirar/trocar, alergia), em uma frase clara.") }),
     run: async ({ request }) => notifyOrderChange(request),
+  });
+
+  // Pedido que só a equipe pode decidir (lanche personalizado, condição especial): avisa a equipe pelo WhatsApp de alerta.
+  let teamAsked = false;
+  const askTeam = betaZodTool({
+    name: "ask_team",
+    description: "Avisa a equipe da loja (WhatsApp) quando o cliente pede algo que SÓ ela pode decidir e você não pode prometer: lanche personalizado/simplificado, montar diferente, condição especial, dúvida que o cardápio não responde. Depois diga ao cliente que vai confirmar com a equipe e já retorna — nunca diga 'não temos' nem 'não fazemos'.",
+    inputSchema: z.object({ request: z.string().min(3).max(300).describe("O que o cliente pediu/perguntou, completo, em uma frase clara.") }),
+    run: async ({ request }) => {
+      teamAsked = true;
+      const sent = await alertTeam(tenantId, `❓ *Cliente pediu algo que o bot não pode decidir*\n👤 ${pushName || "Cliente"}\n📱 ${phone}\n💬 https://wa.me/${phone.replace(/\D/g, "")}\n✏️ ${request}`);
+      return sent
+        ? "Equipe avisada. Diga ao cliente que vai confirmar com a equipe e já retorna — não prometa que vai ser feito e não diga que não fazem."
+        : "A equipe será avisada pelo painel. Diga ao cliente que vai confirmar com a equipe e já retorna.";
+    },
   });
 
   const sendStoreLocation = betaZodTool({
@@ -1482,7 +1605,7 @@ export async function handleAiConversation(
     },
   });
 
-  const tools = [updateCartItem, repeatLastOrder, requestOrderChange, setFulfillmentType, setDeliveryAddress, checkDeliveryArea, setPaymentMethod, sendPixKey, sendStoreLocation, sendMenu, useLastAddress, finalizeOrder, ...(sodaRules ? [setComboSoda] : []), ...(extras ? [setItemExtra] : [])];
+  const tools = [updateCartItem, repeatLastOrder, requestOrderChange, askTeam, setFulfillmentType, setDeliveryAddress, checkDeliveryArea, setPaymentMethod, sendPixKey, sendStoreLocation, sendMenu, useLastAddress, finalizeOrder, ...(sodaRules ? [setComboSoda] : []), ...(extras ? [setItemExtra] : [])];
 
   const hours = hoursText(tenant.businessHours);
   const openNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours });
@@ -1805,6 +1928,13 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
       console.error("[ai-conversation] falha ao avisar a equipe da alteração:", err);
     }
   }
+
+  // A IA prometeu "vou confirmar com a equipe" sem avisar ninguém: a promessa ao cliente nunca pode ficar vazia.
+  if (!changeNotified && !teamAsked && !draft.paymentSplitNote && !(activeOrders && replies.some((r) => CLAIMS_TEAM_NOTIFIED_RE.test(r))) && replies.some((r) => TEAM_PROMISE_RE.test(r))) {
+    background(alertTeamPromise(tenantId, phone, pushName, text, replies.join(" ")));
+  }
+  // Imagem (comprovante): o bot não confere pagamento — nunca deixa passar "Pix recebido/confirmado".
+  if (image && replies.some((r) => PAYMENT_CONFIRMED_CLAIM_RE.test(r))) replies = [PROOF_SAFE_REPLY];
 
   // Só vale pra quem NÃO tem pedido em andamento: com pedido real ("seu pedido #53 tá na
   // fila") citar pedido/número é resposta correta, não confirmação inventada.
