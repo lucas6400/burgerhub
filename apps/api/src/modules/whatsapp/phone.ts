@@ -27,3 +27,22 @@ export function brazilCellphoneLink(raw: string): string {
   }
   return `https://wa.me/55${digits}`;
 }
+
+export interface WaMessageKey {
+  remoteJid?: string;
+  remoteJidAlt?: string;
+  senderPn?: string;
+  participantPn?: string;
+}
+
+/**
+ * JID do cliente a partir da chave da mensagem. O WhatsApp novo entrega alguns contatos por "@lid" — um identificador
+ * anônimo que NÃO é telefone: usá-lo como número faria o bot responder pra um número inexistente (e a conversa ficaria
+ * sem resposta). O telefone real, quando existe, vem em remoteJidAlt/senderPn. Devolve "" se só há o @lid.
+ */
+export function customerJidFromKey(key: WaMessageKey | undefined): string {
+  const jid = key?.remoteJid ?? "";
+  if (!jid.endsWith("@lid")) return jid;
+  const alt = [key?.remoteJidAlt, key?.senderPn, key?.participantPn].find((j) => typeof j === "string" && j.endsWith("@s.whatsapp.net"));
+  return alt ?? "";
+}

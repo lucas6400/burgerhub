@@ -15,6 +15,7 @@ import { serializeByKey } from "./request-queue.js";
 import { maybeRunFollowUpSweep } from "./followup.service.js";
 import { maybeRunLateOrderSweep } from "./late-orders.service.js";
 import { audioTranscriptionEnabled, transcribeAudio } from "./gemini.service.js";
+import { customerJidFromKey } from "./phone.js";
 import { computeBroadcastRecipients, sendBroadcastMessage } from "./broadcast.service.js";
 import { LABEL_STAGES, labelStatus, moveLead, stageFromSessionData, type LabelStage } from "./labels.service.js";
 
@@ -212,7 +213,7 @@ whatsappRoutes.post(
 interface WebhookBody {
   event?: string;
   data?: {
-    key?: { id?: string; remoteJid?: string; fromMe?: boolean };
+    key?: { id?: string; remoteJid?: string; remoteJidAlt?: string; senderPn?: string; participantPn?: string; fromMe?: boolean };
     pushName?: string;
     message?: {
       conversation?: string;
@@ -321,8 +322,11 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
   const eventName = (body.event ?? "").toLowerCase().replace(/_/g, ".");
   if (eventName && eventName !== "messages.upsert") return;
 
-  const jid = body.data?.key?.remoteJid ?? "";
-  if (!jid) return;
+  const jid = customerJidFromKey(body.data?.key);
+  if (!jid) {
+    if (body.data?.key?.remoteJid?.endsWith("@lid")) console.error("[whatsapp] mensagem com @lid e sem telefone real (remoteJidAlt/senderPn ausentes) — não dá pra responder:", body.data.key.remoteJid.slice(0, 8) + "…");
+    return;
+  }
   if (jid.endsWith("@g.us")) return; // ignora grupos
   // Alguns contatos chegam com sufixo de aparelho ("5577999999999:86@s.whatsapp.net") — sem tirar,
   // o bot respondia pra um número errado e o cliente ficava sem resposta.
