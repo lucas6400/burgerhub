@@ -122,6 +122,34 @@ async function evoFetch(path: string, options: RequestInit = {}) {
   return res;
 }
 
+/**
+ * (Re)aplica o webhook da instância apontando pra esta API. A Evolution v2 aceita o corpo embrulhado em `webhook`;
+ * versões/variações mais antigas aceitam o corpo "solto" — tenta um e depois o outro. Nunca lança: falhar aqui não pode
+ * impedir a conexão (só fica no log).
+ */
+async function ensureWebhook(instance: string): Promise<boolean> {
+  const url = `${env.whatsapp.publicApiUrl}/api/whatsapp/webhook/${instance}`;
+  const events = ["MESSAGES_UPSERT"];
+  const bodies = [
+    { webhook: { enabled: true, url, webhookByEvents: false, webhookBase64: false, events } },
+    { enabled: true, url, webhookByEvents: false, webhookBase64: false, events },
+  ];
+  for (const body of bodies) {
+    try {
+      const res = await fetch(`${env.whatsapp.serverUrl}/webhook/set/${instance}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: env.whatsapp.apiKey },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return true;
+      console.error(`[whatsapp] webhook/set respondeu ${res.status} (${instance}) — tentando outro formato`);
+    } catch (err) {
+      console.error("[whatsapp] falha ao reaplicar o webhook:", err);
+    }
+  }
+  return false;
+}
+
 const real = {
   /** Garante a instância do tenant e retorna o QR (ou status conectado). */
   async connect(instance: string): Promise<ConnectionInfo> {
@@ -138,6 +166,10 @@ const real = {
         },
       }),
     }).catch(() => undefined); // já existe → segue para connect
+
+    // Instância que já existia responde 403 acima e o webhook NÃO é recriado — depois de reinício/recriação do servidor
+    // ele pode ter se perdido e o bot fica "conectado" mas sem receber nenhuma mensagem de cliente. Reaplica sempre.
+    await ensureWebhook(instance);
 
     const res = await evoFetch(`/instance/connect/${instance}`);
     const body = (await res.json().catch(() => ({}))) as { base64?: string; code?: string };

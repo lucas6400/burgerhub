@@ -251,8 +251,45 @@ function catalogMessageText(message: NonNullable<NonNullable<WebhookBody["data"]
 /** Espera antes de responder no modo IA, pra juntar mensagens picadas do cliente. */
 const BOT_DEBOUNCE_MS = Number(process.env.WA_DEBOUNCE_MS ?? (env.whatsapp.mock ? 0 : 10_000));
 const ECHO_WAIT_MS = env.whatsapp.mock ? 0 : 3_000;
-/** Depois que um humano fala com o cliente, o bot fica calado por esse tempo. */
-const HUMAN_PAUSE_MS = 2 * 60 * 60_000;
+/**
+ * Depois que um humano fala com o cliente, o bot fica calado por esse tempo (renovado a cada mensagem da equipe).
+ * Eram 2h: a equipe mandava um aviso e não conseguia continuar (celular quebrado, entrega) e o cliente ficava sem
+ * ninguém por horas. Agora 10 min: se a equipe não continuar a conversa, o bot volta a responder na próxima mensagem do cliente.
+ */
+const HUMAN_PAUSE_MS = 10 * 60_000;
+
+/** Mensagens "embrulhadas" (conversa com mensagens temporárias, visualização única, legenda de documento): o conteúdo está dentro. */
+function unwrapMessage<T extends object | undefined>(message: T): T {
+  let current = message as Record<string, any> | undefined;
+  for (let i = 0; i < 3 && current; i++) {
+    const inner = current.ephemeralMessage?.message ?? current.viewOnceMessage?.message ?? current.viewOnceMessageV2?.message ?? current.documentWithCaptionMessage?.message ?? current.editedMessage?.message;
+    if (!inner) break;
+    current = inner;
+  }
+  return current as T;
+}
+
+/**
+ * Vídeo, figurinha, documento, contato etc.: o bot não lê, mas a mensagem NÃO pode sumir (antes era descartada sem
+ * registro nem resposta — o cliente ficava sem retorno e a equipe nem via que ele escreveu). Registra e avisa o cliente.
+ */
+async function handleUnsupportedMessage(tenantId: string, instance: string, phone: string, kinds: string[], pushName?: string) {
+  try {
+    const label = kinds.includes("videoMessage") ? "🎬 Vídeo" : kinds.includes("stickerMessage") ? "🙂 Figurinha" : kinds.includes("documentMessage") ? "📄 Documento" : kinds.includes("contactMessage") || kinds.includes("contactsArrayMessage") ? "👤 Contato" : "📎 Mensagem";
+    await recordInboundMessage(tenantId, phone, `${label} recebido (o bot só lê texto, foto, áudio e localização)`, pushName);
+    const [flags, session, recentOut] = await Promise.all([
+      prisma.tenantSettings.findUnique({ where: { tenantId }, select: { botEnabled: true } }),
+      prisma.chatSession.findUnique({ where: { tenantId_phone: { tenantId, phone } }, select: { botPausedUntil: true } }),
+      prisma.whatsAppMessage.findFirst({ where: { tenantId, phone, direction: "OUT", createdAt: { gte: new Date(Date.now() - 5 * 60_000) } }, select: { id: true } }),
+    ]);
+    if (!flags?.botEnabled || (session?.botPausedUntil && session.botPausedUntil > new Date()) || recentOut) return;
+    const reply = "Recebi sua mensagem 😊 Mas por aqui eu só consigo ler texto, foto, áudio e localização. Pode me escrever o que você precisa?";
+    await waTransport.sendText(instance, phone, reply);
+    await recordOutboundMessage(tenantId, phone, reply, { senderType: "BOT" });
+  } catch (err) {
+    console.error("Erro ao tratar mensagem não suportada do WhatsApp:", err);
+  }
+}
 const MEDIA_PLACEHOLDERS = ["📍 Localização compartilhada", "🖼️ Imagem recebida", "🎤 Áudio recebido"];
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
 
@@ -279,6 +316,7 @@ async function handleAudioMessage(tenantId: string, instance: string, phone: str
 async function processWebhookMessage(instance: string, body: WebhookBody) {
   if (!instance.startsWith("bh_")) return;
   const tenantId = instance.slice(3);
+  if (body.data?.message) body.data.message = unwrapMessage(body.data.message);
 
   const eventName = (body.event ?? "").toLowerCase().replace(/_/g, ".");
   if (eventName && eventName !== "messages.upsert") return;
@@ -376,7 +414,12 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
     }
     text = audioTranscript;
   }
-  if (!text.trim() && !location && !image) return;
+  if (!text.trim() && !location && !image) {
+    // Reação (👍 numa mensagem) e mensagens de sistema não pedem resposta; o resto (vídeo, figurinha, documento...) pede.
+    const kinds = Object.keys((body.data?.message ?? {}) as object).filter((k) => !["messageContextInfo", "senderKeyDistributionMessage", "reactionMessage", "protocolMessage"].includes(k));
+    if (kinds.length > 0 && !body.data?.key?.fromMe) await handleUnsupportedMessage(tenantId, instance, phone, kinds, body.data?.pushName);
+    return;
+  }
   const recordedText = audioTranscript ? `🎤 (áudio) ${audioTranscript}` : location ? "📍 Localização compartilhada" : image ? (text.trim() ? `🖼️ Imagem recebida — ${text}` : "🖼️ Imagem recebida") : text;
 
   let inbound: { id: string; createdAt: Date };
