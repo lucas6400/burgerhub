@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
   BarChart3,
@@ -27,11 +27,13 @@ import {
   Users,
   UtensilsCrossed,
   Wallet,
+  WifiOff,
   X,
 } from "lucide-react";
 import { useAuth } from "../../stores/auth";
 import { useNewOrderAlert } from "../../hooks/useNewOrderAlert";
 import { useUnreadConversations } from "../../hooks/useUnreadConversations";
+import { useWhatsAppConnection } from "../../hooks/useWhatsAppConnection";
 
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, end: true },
@@ -78,6 +80,10 @@ export function AppShell() {
   const newOrderCount = useNewOrderAlert(tenant);
   const unreadConversations = useUnreadConversations();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Cozinha e entregador não mexem no WhatsApp da loja — o aviso é pra quem pode reconectar.
+  const canSeeWaStatus = !!user && !["KITCHEN", "COURIER"].includes(user.role);
+  const { down: whatsappDown } = useWhatsAppConnection(canSeeWaStatus, tenant?.id);
   const kdsEnabled = tenant?.settings?.kdsEnabled ?? true;
 
   // Manifesto próprio do painel (escopo "/", diferente do /motoboy) — necessário
@@ -240,6 +246,16 @@ export function AppShell() {
             </div>
           </div>
         </header>
+        {whatsappDown && !location.pathname.startsWith("/whatsapp") && (
+          <NavLink
+            to="/whatsapp"
+            role="alert"
+            className="flex shrink-0 items-center justify-center gap-2 bg-red-600 px-4 py-2.5 text-center text-sm font-semibold text-white"
+          >
+            <WifiOff size={16} className="shrink-0" />
+            <span>WhatsApp desconectado — o bot NÃO está recebendo mensagens. Toque aqui pra reconectar.</span>
+          </NavLink>
+        )}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
           <Outlet />
         </main>
