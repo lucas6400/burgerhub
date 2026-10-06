@@ -28,6 +28,8 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens?: number;
+  /** Parte de cacheCreationInputTokens escrita no cache de 1 HORA (custa 2x o input; o de 5 min custa 1,25x). */
+  cacheCreation1hInputTokens?: number;
   cacheReadInputTokens?: number;
 }
 
@@ -44,11 +46,13 @@ export function estimateCostCents(model: string, usage: TokenUsage): number | nu
     console.warn(`[ai/pricing] modelo desconhecido na tabela de preço, custo não calculado: ${model}`);
     return null;
   }
-  const cacheCreation = usage.cacheCreationInputTokens ?? 0;
+  const cacheCreation1h = Math.min(usage.cacheCreation1hInputTokens ?? 0, usage.cacheCreationInputTokens ?? 0);
+  const cacheCreation5m = (usage.cacheCreationInputTokens ?? 0) - cacheCreation1h;
   const cacheRead = usage.cacheReadInputTokens ?? 0;
   const cost =
     (usage.inputTokens / 1_000_000) * pricing.inputPerMTokCents +
-    (cacheCreation / 1_000_000) * pricing.inputPerMTokCents * 1.25 +
+    (cacheCreation5m / 1_000_000) * pricing.inputPerMTokCents * 1.25 +
+    (cacheCreation1h / 1_000_000) * pricing.inputPerMTokCents * 2 +
     (cacheRead / 1_000_000) * pricing.cachedInputPerMTokCents +
     (usage.outputTokens / 1_000_000) * pricing.outputPerMTokCents;
   return Math.round(cost);

@@ -135,6 +135,19 @@ export async function handleHumanRequest(tenantId: string, phone: string, pushNa
   return ["Claro! 🙏 Já chamei um atendente da equipe pra falar com você por aqui — ele responde assim que puder."];
 }
 
+// ── Cliente desistiu do carrinho ───────────────────────────────────────────────
+
+const DECLINE_RE = /^\s*(?:n[aã]o,?\s+obrigad[oa]|(?:quero )?hoje n[aã]o|quero n[aã]o|deixa(?: quieto| pra l[aá])?|deixa pra pr[oó]xima|desisti|n[aã]o quero(?: mais)?|n[aã]o vou querer|amanh[aã] (?:eu )?(?:pe[cç]o|vejo|fa[cç]o)|outra hora|fica pra pr[oó]xima|cancela(?:r)?|obrigad[oa],? (?:mas )?n[aã]o)(?:\s+obrigad[oa])?[\s!.,]*$/i;
+const PLEASANTRY_RE = /^\s*(?:obrigad[oa]s?|ok|blz|beleza|valeu|tmj|tudo bem|certo|desculpa|😊|🙏|👍)[\s!.,]*$/i;
+/**
+ * Recusa explícita ("não obrigado", "hoje não", "deixa quieto", "amanhã eu peço"). O "não" sozinho NÃO conta: responde a
+ * "posso seguir?" e pode ser "não, quero mudar". Já aconteceu de o bot insistir no pedido depois de um "hoje não".
+ */
+export function isDecline(text: string): boolean {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.length > 0 && lines.some((l) => DECLINE_RE.test(l)) && lines.every((l) => DECLINE_RE.test(l) || PLEASANTRY_RE.test(l));
+}
+
 // ── Reclamação / estorno: avisa o dono sem calar o bot ─────────────────────────
 
 const COMPLAINT_RE = /\b(estorno|estornar|reembolso|reembolsar|devolu[cç][aã]o|dinheiro de volta|procon|processar|processo|boletim|den[uú]ncia|golpe|palha[cç]ada|absurdo)\b/i;
@@ -165,9 +178,13 @@ export async function applyLocationToActiveOrder(tenantId: string, phone: string
   const maps = `🗺️ Waze: https://waze.com/ul?ll=${location.lat},${location.lng}&navigate=yes\n🗺️ Maps: https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}`;
 
   let feeNote = "";
+  let feeForCustomer = "";
   let outsideArea = false;
   try {
     const quote = await quoteDelivery(tenantId, { street: "", number: "", neighborhood: "", city: "", ...location }, order.subtotalCents);
+    const feeText = quote.feeCents === 0 ? "grátis 🎉" : `R$ ${(quote.feeCents / 100).toFixed(2).replace(".", ",")}`;
+    // Quem manda localização costuma querer saber o valor da entrega ("quanto fica?"): responde junto, sem prometer mudar o pedido.
+    feeForCustomer = ` Taxa de entrega nesse endereço: ${feeText}${quote.feeCents !== order.deliveryFeeCents ? " (a equipe confirma o valor do seu pedido)" : ""}.`;
     if (quote.feeCents !== order.deliveryFeeCents) feeNote = `\n💲 Taxa do pedido: R$ ${(order.deliveryFeeCents / 100).toFixed(2)} — pela nova localização seria R$ ${(quote.feeCents / 100).toFixed(2)}.`;
   } catch (err) {
     if (err instanceof AppError && err.statusCode === 409) outsideArea = true;
@@ -190,7 +207,7 @@ export async function applyLocationToActiveOrder(tenantId: string, phone: string
     },
   });
   await alertTeam(tenantId, `📍 *Cliente mandou NOVA localização* — o endereço do pedido foi atualizado\n📱 ${phone}\n💬 ${waLink(phone)}\n${orderLine(order)}\n${maps}${feeNote}`);
-  return [`Recebi sua nova localização! ✅ Já atualizei o endereço do pedido #${order.number} e avisei a equipe.`];
+  return [`Recebi sua nova localização! ✅ Atualizei o endereço do pedido #${order.number} e avisei a equipe.${feeForCustomer} Se não era pra mudar o endereço, me avisa!`];
 }
 
 // ── 2. Pagamento dividido ──────────────────────────────────────────────────────
@@ -206,12 +223,25 @@ const SPLIT_JOINER_RE = /\b(e|mais|resto|restante|metade|parte|outro|outra|o out
 
 /** "20 no dinheiro e o resto no pix", "metade pix metade cartão", "pix e dinheiro": 2+ formas numa frase que não é pergunta. */
 export function detectSplitPayment(text: string): { main: string; note: string } | null {
-  // Mensagens seguidas chegam juntas (uma por linha): a nota é só a linha que fala do pagamento, não o endereço ao lado.
-  for (const line of text.split("\n")) {
+  // Mensagens seguidas chegam juntas (uma por linha): a nota leva só as linhas que falam de pagamento — a forma e os
+  // valores ("PIX e dinheiro" / "4 no Pix" / "E 46 no dinheiro") — e não o endereço que veio ao lado.
+  const lines = text.split("\n").map((l) => l.replace(/\s+/g, " ").trim());
+  for (const line of lines) {
     const found = detectSplitInLine(line);
-    if (found) return found;
+    if (!found) continue;
+    const related = lines.filter((l) => l.length > 0 && l.length <= 160 && !l.includes("?") && METHOD_WORDS.some(([, re]) => re.test(l)));
+    return { main: found.main, note: related.join(" | ").slice(0, 240) };
   }
   return null;
+}
+
+/** Valores do pagamento dividido em mensagem separada, depois do aviso ("4 no Pix", "E 46 no dinheiro"). */
+export function extractSplitAmounts(text: string): string | null {
+  const lines = text
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter((l) => l.length > 0 && l.length <= 80 && !l.includes("?") && /\d/.test(l) && METHOD_WORDS.some(([, re]) => re.test(l)));
+  return lines.length > 0 ? lines.join(" | ") : null;
 }
 
 function detectSplitInLine(line: string): { main: string; note: string } | null {

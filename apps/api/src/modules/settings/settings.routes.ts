@@ -3,7 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { prisma } from "../../lib/prisma.js";
 import { h } from "../../lib/http.js";
-import { requireAuth, requireRole, tenantOf } from "../../middlewares/auth.js";
+import { invalidateUserState, requireAuth, requireRole, tenantOf } from "../../middlewares/auth.js";
 import { AppError } from "../../middlewares/error.js";
 import { rateLimit } from "../../middlewares/rateLimit.js";
 import { geocodeAddress, reverseGeocode } from "../orders/geocoding.js";
@@ -502,6 +502,17 @@ settingsRoutes.put(
     });
     if (!existing) throw new AppError(404, "Usuário não encontrado");
 
+    const roleChanged = data.role !== undefined && data.role !== existing.role;
+    if (roleChanged && existing.id === req.auth!.userId) {
+      throw new AppError(400, "Você não pode mudar o seu próprio cargo");
+    }
+    // Nunca deixa a loja sem administrador: rebaixar ou desativar o último ADMIN ativo trava o acesso às configurações.
+    const losesAdmin = existing.role === "ADMIN" && existing.active && ((roleChanged && data.role !== "ADMIN") || data.active === false);
+    if (losesAdmin) {
+      const otherAdmins = await prisma.user.count({ where: { tenantId, role: "ADMIN", active: true, id: { not: existing.id } } });
+      if (otherAdmins === 0) throw new AppError(400, "Precisa existir pelo menos um administrador ativo. Promova outra pessoa antes.");
+    }
+
     const user = await prisma.user.update({
       where: { id: existing.id },
       data: {
@@ -512,6 +523,7 @@ settingsRoutes.put(
       },
       select: { id: true, name: true, email: true, role: true, active: true },
     });
+    invalidateUserState(existing.id);
     await audit({
       tenantId,
       userId: req.auth!.userId,
@@ -536,6 +548,12 @@ settingsRoutes.delete(
       where: { id: req.params.id, tenantId },
     });
     if (!existing) throw new AppError(404, "Usuário não encontrado");
+
+    if (existing.role === "ADMIN" && existing.active) {
+      const otherAdmins = await prisma.user.count({ where: { tenantId, role: "ADMIN", active: true, id: { not: existing.id } } });
+      if (otherAdmins === 0) throw new AppError(400, "Precisa existir pelo menos um administrador ativo. Promova outra pessoa antes.");
+    }
+    invalidateUserState(existing.id);
 
     // Preserva histórico: se já tem ações no log de auditoria, só desativa
     const hasHistory = await prisma.auditLog.count({ where: { userId: existing.id } });

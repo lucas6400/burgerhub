@@ -29,6 +29,8 @@ import {
   applyLocationToActiveOrder,
   detectSplitPayment,
   extractDeliveryReference,
+  extractSplitAmounts,
+  isDecline,
   findActiveOrder,
   handleHumanRequest,
   isComplaint,
@@ -118,7 +120,7 @@ interface OrderDraft {
   /** Transiente: texto do cardápio montado por send_menu, enviado como mensagem própria. */
   pendingMenuText?: string;
   /** Combo escolhido na lista quando o carrinho já tem outro: espera o cliente dizer se TROCA ou SOMA. */
-  pendingComboPick?: { productId: string; name: string; unitPriceCents: number };
+  pendingComboPick?: { productId: string; name: string; unitPriceCents: number; mode?: "swap" | "dup" };
   /** Cliente pediu pagamento dividido ("20 no dinheiro e o resto no Pix"): vai nas observações do pedido e avisa a equipe. */
   paymentSplitNote?: string;
   /** Referência de endereço / recado pro entregador ("portão cinza"): vai no endereço do pedido. */
@@ -260,6 +262,7 @@ async function consumeRunner(
     usage.outputTokens += message.usage.output_tokens;
     usage.cacheCreationInputTokens = (usage.cacheCreationInputTokens ?? 0) + (message.usage.cache_creation_input_tokens ?? 0);
     usage.cacheReadInputTokens = (usage.cacheReadInputTokens ?? 0) + (message.usage.cache_read_input_tokens ?? 0);
+    usage.cacheCreation1hInputTokens = (usage.cacheCreation1hInputTokens ?? 0) + (message.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0);
   }
   const finalMessage = await runner;
   return { finalMessage, usage };
@@ -562,7 +565,7 @@ const phoneTail = (phone: string) => phone.replace(/\D/g, "").slice(-8);
 
 /** Frases em que a IA afirma que o pedido foi confirmado/finalizado — usado como rede de segurança contra hallucination (ver uso em handleAiConversation). */
 const FALSE_CONFIRMATION_RE =
-  /pedido\s*(foi|est[aá])?\s*confirmad[oa]|confirmamos\s+(o\s+)?seu\s+pedido|n[uú]mero\s+do\s+(seu\s+)?pedido|(est[aá]|foi|vai)\s+a\s+caminho|entregador\s+(chega|est[aá]\s+a\s+caminho)|pedido\s+(j[aá]\s+)?(foi\s+)?(registrado|enviado|anotado)|confirmar\s+essa\s+altera[cç][aã]o|equipe\s+est[aá]\s+acompanhando|j[aá]\s+(t[aá]|est[aá])\s+(vindo|saindo|a\s+caminho|indo)|(lanche|pedido|entregador)\s+(j[aá]\s+)?(t[aá]|est[aá])\s+(a\s+caminho|saindo|vindo|indo|sendo\s+preparado|na\s+fila|preparando)|na\s+fila\s+da\s+cozinha|entregador\s+(j[aá]\s+)?(saiu|t[aá]\s+indo|est[aá]\s+indo)/i;
+  /pedido\s*\*?(?:#\s*\d+)?\*?\s*(foi|est[aá])?\s*confirmad[oa]|pedido\s*\*?#\s*\d+\*?\s*(foi|est[aá]|j[aá]|ficou)(?=[\s.,!]|$)|confirmamos\s+(o\s+)?seu\s+pedido|n[uú]mero\s+do\s+(seu\s+)?pedido|(est[aá]|foi|vai)\s+a\s+caminho|entregador\s+(chega|est[aá]\s+a\s+caminho)|pedido\s+(j[aá]\s+)?(foi\s+)?(registrado|enviado|anotado)|confirmar\s+essa\s+altera[cç][aã]o|equipe\s+est[aá]\s+acompanhando|j[aá]\s+(t[aá]|est[aá])\s+(vindo|saindo|a\s+caminho|indo)|(lanche|pedido|entregador)\s+(j[aá]\s+)?(t[aá]|est[aá])\s+(a\s+caminho|saindo|vindo|indo|sendo\s+preparado|na\s+fila|preparando)|na\s+fila\s+da\s+cozinha|entregador\s+(j[aá]\s+)?(saiu|t[aá]\s+indo|est[aá]\s+indo)/i;
 
 /** Resposta curta que confirma um resumo já lido ("sim", "ok", "pode confirmar"...). */
 /** O modelo às vezes NARRA a forma de pagamento sem chamar set_payment_method — o cliente disse, o código registra. */
@@ -1079,6 +1082,15 @@ export async function handleAiConversation(
     const updated = await applyLocationToActiveOrder(tenantId, phone, location);
     if (updated) return updated;
   }
+  // Recusa explícita com carrinho aberto ("hoje não", "deixa quieto"): limpa o carrinho e para de insistir. Sem isso o bot
+  // seguia pedindo pagamento e os lembretes automáticos continuavam chegando pra quem já tinha dito que não.
+  if (!draft.finalizedOrderId && draft.cart.length > 0 && isDecline(text) && !(await getActiveOrdersText(tenantId, phone))) {
+    Object.assign(draft, { cart: [], type: undefined, address: undefined, deliveryFeeCents: undefined, deliveryDistanceKm: undefined, paymentMethod: undefined, paymentSplitNote: undefined, deliveryRef: undefined, pendingComboPick: undefined, offeredRepeat: undefined });
+    const reply = "Tudo bem! Se mudar de ideia é só chamar 🍔";
+    data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
+    await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
+    return [reply];
+  }
   // Regras de refri da loja (marcas por tamanho + acréscimo da Coca no combo); nulo = regra antiga (nunca promete marca).
   const sodaRules = parseSodaRules(tenant.settings.sodaRules);
   // Adicionais que o bot vende em hambúrguer/combo (bacon extra, ovo...); nulo = o bot não vende adicional.
@@ -1104,6 +1116,11 @@ export async function handleAiConversation(
   // fica no rascunho e entra no pedido ao finalizar.
   const split = detectSplitPayment(text);
   const deliveryRef = draft.type === "PICKUP" ? null : extractDeliveryReference(text);
+  // Valores do pagamento dividido que chegam em mensagem separada ("4 no Pix" / "E 46 no dinheiro") complementam a nota.
+  if (!split && draft.paymentSplitNote) {
+    const more = extractSplitAmounts(text);
+    if (more && !draft.paymentSplitNote.includes(more)) draft.paymentSplitNote = `${draft.paymentSplitNote} | ${more}`.slice(0, 300);
+  }
   // true quando o sistema já anotou no pedido e avisou a equipe neste turno — evita o 2º alerta da ferramenta da IA.
   let systemNotified = false;
   if (split || deliveryRef || image) {
@@ -1224,8 +1241,21 @@ export async function handleAiConversation(
     const pending = draft.pendingComboPick;
     draft.pendingComboPick = undefined;
     const flat = text.toLowerCase();
-    const wantsSwap = /\b(troc\w*|no lugar|em vez|ao inv[eé]s|substitu\w*|s[oó] (o|esse|essa)|apenas|somente)\b/.test(flat);
-    const wantsBoth = /\b(somar|soma|somando|os dois|juntos?|ambos|mais esse|tamb[eé]m)\b/.test(flat);
+    if (pending.mode === "dup") {
+      // "Mais uma unidade ou só essa?": só uma das duas respostas vale; qualquer outra coisa expira a pergunta.
+      const wantsMore = /\b(mais (uma|um)|outr[oa]|duas|dois|2|adicion\w*|sim|quero)\b/.test(flat);
+      const wantsKeep = /\b(s[oó] (uma|um|essa|esse|1)|apenas|somente|n[aã]o|engano|errei|erro|isso mesmo|1)\b/.test(flat);
+      if (wantsMore !== wantsKeep) {
+        const line = draft.cart.find((c) => c.productId === pending.productId);
+        if (line && wantsMore) line.quantity += 1;
+        const reply = `${wantsMore ? "Fechado, mais uma!" : "Beleza, só uma!"} ✅ Subtotal ${brl(draftTotal(draft))}.\n${nextStepPrompt(draft)}`;
+        data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
+        await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
+        return [reply];
+      }
+    }
+    const wantsSwap = pending.mode !== "dup" && /\b(troc\w*|no lugar|em vez|ao inv[eé]s|substitu\w*|s[oó] (o|esse|essa)|apenas|somente)\b/.test(flat);
+    const wantsBoth = pending.mode !== "dup" && /\b(somar|soma|somando|os dois|juntos?|ambos|mais esse|tamb[eé]m)\b/.test(flat);
     const product = wantsSwap !== wantsBoth ? await prisma.product.findFirst({ where: { id: pending.productId, tenantId, available: true } }) : null;
     if (product) {
       if (wantsSwap) draft.cart = draft.cart.filter((c) => !c.name.includes("+"));
@@ -1263,15 +1293,22 @@ export async function handleAiConversation(
     const comboConflict = (nums: number[]) => {
       if (nums.length !== 1) return null;
       const item = lastMenu.find((m) => m.n === nums[0]);
-      if (!item || !item.name.includes("+")) return null;
+      if (!item) return null;
+      // Mesmo número de novo ("11" duas vezes, ou "número 11" + "11"): somava uma 2ª unidade sem o cliente querer (R$100 em vez de R$50).
+      const same = draft.cart.find((c) => c.productId === item.productId);
+      if (same) return { mode: "dup" as const, item, inCart: `${same.quantity}x ${same.name}` };
+      if (!item.name.includes("+")) return null;
       const inCart = draft.cart.filter((c) => c.name.includes("+") && c.productId !== item.productId);
-      return inCart.length > 0 ? { item, inCart: inCart.map((c) => `${c.quantity}x ${c.name}`).join(" + ") } : null;
+      return inCart.length > 0 ? { mode: "swap" as const, item, inCart: inCart.map((c) => `${c.quantity}x ${c.name}`).join(" + ") } : null;
     };
     const conflict = picks ? comboConflict(picks) : null;
     if (picks && conflict) {
-      // O código pergunta (a IA se atrapalhava com a dúvida) e guarda o item até o cliente responder "trocar" ou "somar".
-      draft.pendingComboPick = { productId: conflict.item.productId, name: conflict.item.name, unitPriceCents: conflict.item.unitPriceCents };
-      const reply = `Você já tem *${conflict.inCart}* no pedido. Quer *trocar* por *${conflict.item.name}* (${brl(conflict.item.unitPriceCents)}) ou *somar* os dois?`;
+      // O código pergunta (a IA se atrapalhava com a dúvida) e guarda o item até o cliente responder.
+      draft.pendingComboPick = { productId: conflict.item.productId, name: conflict.item.name, unitPriceCents: conflict.item.unitPriceCents, mode: conflict.mode };
+      const reply =
+        conflict.mode === "dup"
+          ? `Você já tem *${conflict.inCart}* no pedido. Quer *mais uma* unidade ou é só essa mesmo?`
+          : `Você já tem *${conflict.inCart}* no pedido. Quer *trocar* por *${conflict.item.name}* (${brl(conflict.item.unitPriceCents)}) ou *somar* os dois?`;
       data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
       await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
       return [reply];
@@ -1655,7 +1692,9 @@ export async function handleAiConversation(
     {
       type: "text",
       text: buildStaticSystemBlock(tenant.name, catalog, hours, storeAddress, generalDeliveryInfo, tenant.settings.acceptsDineIn, sodaPolicy, extrasPolicy),
-      cache_control: { type: "ephemeral" },
+      // 1 hora (não os 5 min padrão): o Sonnet só roda nas mensagens que mexem no carrinho, com intervalos maiores que 5 min,
+      // e cada chamada reescrevia ~10 mil tokens do prompt fixo (1,25x o preço) — mais da metade do gasto do dia era escrita de cache.
+      cache_control: { type: "ephemeral", ttl: "1h" },
     },
     { type: "text", text: dynamicStateText + staffContext },
   ];
@@ -1786,7 +1825,7 @@ export async function handleAiConversation(
     try {
       const turnActions = extractTurnActions(turnMessages);
       const customerMessage = text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : "");
-      const redatorModel = pickRedatorModel({ turnActions, customerMessage, image: redatorImage });
+      const redatorModel = pickRedatorModel({ turnActions, customerMessage, image: redatorImage, draftReply: texts.join("\n") });
       const composed = await composeReply({
         tenantName: tenant.name,
         catalogText: catalog,

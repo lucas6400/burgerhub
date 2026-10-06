@@ -109,6 +109,8 @@ const TABS = [
 export function SettingsPage() {
   const { tenant, user, updateTenantName, updateTenantSlug, updateTenantSettings } = useAuth();
   const canViewAudit = user?.role === "ADMIN" || user?.role === "MANAGER";
+  // Só o administrador cria/edita/remove usuários (o servidor também exige ADMIN).
+  const canEditUsers = user?.role === "ADMIN";
   const [searchParams, setSearchParams] = useSearchParams();
   // Volta da conexão OAuth do Mercado Pago já cai direto na aba certa, com o resultado.
   const mpOauthResult = searchParams.get("mp");
@@ -260,10 +262,24 @@ export function SettingsPage() {
     }
   }
 
-  async function removeUser(u: TeamUser) {
-    if (!confirm(`Remover ${u.name} da equipe?`)) return;
+  async function changeUserRole(u: TeamUser, role: string) {
+    if (role === u.role) return;
+    setUsers((prev) => prev.map((x) => (x.id === u.id ? { ...x, role } : x)));
     try {
-      await api.delete(`/settings/users/${u.id}`);
+      await api.put(`/settings/users/${u.id}`, { role });
+    } catch (err) {
+      setUsers((prev) => prev.map((x) => (x.id === u.id ? { ...x, role: u.role } : x)));
+      alert(err instanceof Error ? err.message : "Erro ao mudar o cargo");
+    }
+  }
+
+  async function removeUser(u: TeamUser) {
+    if (!confirm(`Remover ${u.name} da equipe?\n\nSe ele já tiver histórico no sistema (pedidos, ações), ele fica só desativado para preservar o histórico. Para mudar a função dele, use o seletor de cargo em vez de remover.`)) return;
+    try {
+      const result = await api.delete<{ ok: boolean; softDeleted?: boolean } | undefined>(`/settings/users/${u.id}`);
+      if (result?.softDeleted) {
+        alert(`${u.name} já tem histórico no sistema, então foi apenas DESATIVADO (o histórico fica preservado). Para voltar a usar, ative de novo ou mude o cargo.`);
+      }
       api.get<TeamUser[]>("/settings/users").then(setUsers).catch(() => {});
     } catch (err) {
       alert(err instanceof Error ? err.message : "Erro ao remover usuário");
@@ -1126,7 +1142,22 @@ export function SettingsPage() {
                     </p>
                     <p className="text-xs text-surface-400">{u.email}</p>
                   </div>
-                  <Badge color={u.role === "ADMIN" ? "purple" : "gray"}>{ROLE_LABELS[u.role]}</Badge>
+                  {canEditUsers && !isSelf ? (
+                    <Select
+                      value={u.role}
+                      onChange={(e) => changeUserRole(u, e.target.value)}
+                      className="!w-36 !py-1.5 text-xs"
+                      aria-label={`Cargo de ${u.name}`}
+                    >
+                      {Object.entries(ROLE_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </Select>
+                  ) : (
+                    <Badge color={u.role === "ADMIN" ? "purple" : "gray"}>{ROLE_LABELS[u.role]}</Badge>
+                  )}
                   {isSelf ? (
                     <Badge color={u.active ? "green" : "red"}>{u.active ? "Ativo" : "Inativo"}</Badge>
                   ) : (
