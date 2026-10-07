@@ -211,6 +211,35 @@ whatsappRoutes.post(
   }),
 );
 
+/** Mensagem citada quando o cliente usa "responder" no WhatsApp (contextInfo do protobuf). */
+interface QuotedContext {
+  participant?: string;
+  quotedMessage?: {
+    conversation?: string;
+    extendedTextMessage?: { text?: string };
+    imageMessage?: { caption?: string };
+    videoMessage?: { caption?: string };
+    audioMessage?: object;
+    locationMessage?: object;
+  };
+}
+
+/**
+ * Cliente que "marca" uma mensagem (a dele ou a da loja) e responde com "." ou "isso" pra não escrever de novo: o sentido
+ * está na mensagem citada, que o bot nunca via. Devolve uma linha com a citação pra ir junto do texto — "" se não há citação.
+ */
+export function quotedReplyContext(context: QuotedContext | undefined, customerPhone: string): string {
+  const q = context?.quotedMessage;
+  if (!q) return "";
+  const raw = q.conversation ?? q.extendedTextMessage?.text ?? q.imageMessage?.caption ?? q.videoMessage?.caption ?? (q.imageMessage ? "[imagem]" : q.audioMessage ? "[áudio]" : q.locationMessage ? "[localização]" : "");
+  const snippet = raw.replace(/\s+/g, " ").trim().slice(0, 300);
+  if (!snippet) return "";
+  const author = (context?.participant ?? "").split("@")[0].split(":")[0].replace(/\D/g, "");
+  const tail = customerPhone.replace(/\D/g, "").slice(-8);
+  const whose = !author ? "" : author.endsWith(tail) ? " que ele mesmo escreveu antes" : " da loja";
+  return `↩️ Respondeu à mensagem${whose}: "${snippet}"`;
+}
+
 /** Números do protobuf chegam como número, texto ou objeto Long ({ low, high }). */
 type LongLike = number | string | { low?: number; high?: number } | null;
 function longToNumber(value: LongLike | undefined): number {
@@ -227,7 +256,7 @@ interface WebhookBody {
     pushName?: string;
     message?: {
       conversation?: string;
-      extendedTextMessage?: { text?: string };
+      extendedTextMessage?: { text?: string; contextInfo?: QuotedContext };
       locationMessage?: { degreesLatitude?: number; degreesLongitude?: number };
       imageMessage?: WaRawImageMessage;
       audioMessage?: { seconds?: number; ptt?: boolean; mimetype?: string };
@@ -411,6 +440,9 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
   const image = img?.url && img?.mediaKey ? { ...img, messageId: body.data?.key?.id } : undefined;
   // Legenda da foto vira o texto da mensagem (o bot lê a imagem junto com ela).
   let text = body.data?.message?.conversation ?? body.data?.message?.extendedTextMessage?.text ?? (image ? img?.caption ?? "" : "");
+  // Mensagem marcada ("responder" do WhatsApp): a citação vai junto — o "." só faz sentido com ela.
+  const quotedLine = text.trim() && !image ? quotedReplyContext(body.data?.message?.extendedTextMessage?.contextInfo, phone) : "";
+  if (quotedLine) text = `${quotedLine}\n${text}`;
   if (!text.trim() && !location && !image) {
     const order = body.data?.message?.orderMessage;
     if (order) {

@@ -222,6 +222,55 @@ function formatAddress(address: OrderDraft["address"]): string {
   return [address.street, address.number].filter(Boolean).join(", ") + ` - ${[address.neighborhood, address.city].filter(Boolean).join(", ")}`;
 }
 
+const QUOTE_PREFIX_RE = /^↩️ Respondeu à mensagem( da loja| que ele mesmo escreveu antes)?: "([\s\S]*?)"\n([\s\S]*)$/;
+/** Separa a linha de citação ("responder" do WhatsApp) do que o cliente escreveu. null se a mensagem não é uma resposta marcada. */
+export function parseQuotePrefix(text: string): { fromStore: boolean; quoted: string; own: string } | null {
+  const m = QUOTE_PREFIX_RE.exec(text);
+  return m ? { fromStore: m[1] === " da loja", quoted: m[2], own: m[3].trim() } : null;
+}
+/** Só pontuação ("."), ou um "isso/ok/sim" curtinho — a resposta "marcando" uma mensagem pra não precisar escrever. */
+export const isBareAck = (text: string): boolean => /^[\s.,!…👍🙏]*$/.test(text) || /^\s*(isso|esse|essa|ok|okay|sim|pode|blz|beleza|certo)[\s.!]*$/i.test(text);
+
+const pinKey = (address: OrderDraft["address"]): string => (address?.lat != null && address?.lng != null ? `${address.lat},${address.lng}` : "");
+
+/**
+ * Duas mensagens do mesmo cliente podem rodar ao mesmo tempo (instâncias diferentes): ele manda um texto e logo a
+ * localização; a localização é tratada na hora e salva, mas a execução do texto — que começou ANTES — termina depois,
+ * salva o rascunho antigo por cima (sem o endereço) e a resposta dela ainda pede a localização. Antes de salvar, relê a
+ * sessão e adota o pino que apareceu no meio do caminho.
+ */
+async function adoptConcurrentLocation(sessionId: string, draft: OrderDraft, pinAtStart: string): Promise<void> {
+  try {
+    const row = await prisma.chatSession.findUnique({ where: { id: sessionId }, select: { data: true } });
+    if (!row) return;
+    const latest = (JSON.parse(row.data) as { draft?: OrderDraft }).draft;
+    if (!latest || pinKey(latest.address) === "" || pinKey(latest.address) === pinAtStart) return; // sem pino novo
+    draft.address = latest.address;
+    draft.deliveryFeeCents = latest.deliveryFeeCents;
+    draft.deliveryDistanceKm = latest.deliveryDistanceKm;
+    draft.type = "DELIVERY";
+    draft.rejectedPin = undefined;
+  } catch (err) {
+    console.error("[ai-conversation] falha ao reaproveitar a localização recebida durante a resposta:", err);
+  }
+}
+
+/** Pedido de localização que o bot não deve repetir quando o pino do WhatsApp JÁ foi recebido. */
+const LOCATION_ASK_RE = /(?:me\s+)?(?:manda|mande|envia|envie|compartilha|compartilhe|passa)\w*[^.!?\n]{0,40}localiza[cç][aã]o|📎\s*→\s*localiza|(?:preciso|falta|só falta)[^.!?\n]{0,30}localiza[cç][aã]o/i;
+export function stripLocationAsk(replies: string[], draft: Pick<OrderDraft, "address">): string[] {
+  if (pinKey(draft.address) === "") return replies;
+  return replies
+    .map((r) =>
+      r
+        .split("\n")
+        .map((line) => line.split(/(?<=[.!?])\s+/).filter((sentence) => !LOCATION_ASK_RE.test(sentence)).join(" ").trim())
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    )
+    .filter((r) => r.length > 0);
+}
+
 function emptyUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
 }
@@ -515,6 +564,8 @@ ${extrasPolicy ? `- ${extrasPolicy}
 - Referência de endereço ou recado pro entregador ("portão azul", "ao lado da papelaria", "liga quando chegar"): se já existe pedido em andamento, chame request_order_change com o texto; se ainda é só o carrinho, registre em notes do primeiro item (update_cart_item, ex.: "REF. ENTREGA: portão azul"). NUNCA diga "vou repassar pro entregador" ou "anotei o endereço" sem ter registrado.
 - Nunca comente nem explique o que aparece em outros apps (iFood etc.) e nunca diga que vai mandar a chave Pix: ela só sai pelo sistema quando o cliente pedir pra pagar na hora. Pagamento dividido entre formas (ex.: 20 no dinheiro e o resto no Pix): o SISTEMA já registra no pedido e avisa a equipe — diga que anotou do jeito que o cliente falou e que a equipe confirma com ele; nunca diga que não dá pra dividir. Vale-alimentação: diga que vai confirmar com a equipe e siga o pedido.
 - PERSONALIZAÇÃO ou pedido especial que o cardápio não cobre (lanche simplificado como "só pão, carne e queijo", montar de outro jeito, condição especial): NUNCA diga "não temos", "não fazemos" nem "não dá" — a equipe às vezes faz. Chame ask_team com o pedido do cliente e diga que vai confirmar com a equipe e já retorna.
+- MENSAGEM MARCADA (o cliente usou "responder" do WhatsApp): a mensagem começa com "↩️ Respondeu à mensagem…: "texto"" e depois vem o que ele escreveu. O texto entre aspas é a mensagem a que ele se refere. Se ele escreveu só "." (ou "isso", "esse", "ok"), quer dizer A MESMA COISA da mensagem citada: se a citada é pedido ou dúvida DELE ("que ele mesmo escreveu antes"), trate como se tivesse acabado de escrever aquilo (e registre o pedido); se é da loja (uma pergunta), o "." é um SIM/ok a ela. Nunca cite a marcação de volta nem diga que ele "marcou".
+- PONTUAÇÃO SOLTA ("." , "..", "?") SEM citação: o cliente só está chamando atenção ou esperando — responda curto retomando o próximo passo do pedido; NUNCA entenda como forma de pagamento, confirmação ou escolha de item.
 - COMPROVANTE (imagem de Pix/transferência): você NÃO confere pagamento. Diga só que recebeu o comprovante e que a equipe confere — NUNCA "Pix recebido", "pagamento confirmado" ou "caiu".
 - Se o cliente perguntar se avisamos quando o pedido sair: diga que SIM, a equipe avisa pelo WhatsApp quando sai pra entrega e quando o entregador chega.
 - TIRAR INGREDIENTE ("sem salsicha", "tira o presunto", "um sem ovo"): confira a descrição daquele lanche no CARDÁPIO. Se o ingrediente existe, registre em notes do item (update_cart_item, ex.: "SEM presunto em 1 unidade") e siga o pedido na mesma resposta, sem travar a venda. Se NÃO existe mas tem um parecido ("salsicha" → calabresa), pergunte em UMA frase curta se é esse que ele quer tirar ("O X-Tudo não leva salsicha, mas leva calabresa — é a calabresa que você quer tirar?"). Se não existe nada parecido, diga que o lanche já vem sem aquilo. NUNCA diga que o cliente está enganado, "pensando em outro lanche" ou que o lanche não tem ingredientes que ele tem, e nunca recite a lista inteira de ingredientes. Em combo de vários lanches, "um sem X" = SÓ UMA unidade sem X (registre assim).`;
@@ -900,7 +951,7 @@ Estado atual do pedido (fonte de verdade, não repita de memória — sempre con
 Carrinho: ${items}
 Subtotal + taxa: ${brl(draftTotal(draft))}
 Tipo: ${draft.type ?? "não definido"}
-Endereço: ${draft.type === "DELIVERY" ? formatAddress(draft.address) : "N/A"}
+Endereço: ${draft.type === "DELIVERY" ? formatAddress(draft.address) : "N/A"}${pinKey(draft.address) ? " — 📍 LOCALIZAÇÃO DO WHATSAPP JÁ RECEBIDA e taxa calculada: NUNCA peça a localização de novo, nem diga que precisa dela" : ""}
 Taxa de entrega: ${draft.type === "DELIVERY" ? fee : "N/A"}
 Forma de pagamento: ${draft.paymentMethod ?? "não definida"}${draft.paymentSplitNote ? `\nPAGAMENTO DIVIDIDO pedido pelo cliente: "${draft.paymentSplitNote}" — o sistema JÁ ANOTOU isso no pedido e a equipe confirma com ele. Diga que anotou assim; NUNCA diga que "não dá pra dividir" nem que já está confirmado.` : ""}${draft.deliveryRef ? `\nREFERÊNCIA/RECADO DE ENTREGA já registrado no pedido: "${draft.deliveryRef}" — pode dizer que anotou; não pergunte de novo.` : ""}${menuLine(draft)}`;
 }
@@ -1076,6 +1127,8 @@ export async function handleAiConversation(
   if (isComplaint(text)) background(alertComplaint(tenantId, phone, pushName, text));
 
   const draft = data.draft;
+  // Pino de localização que o rascunho tinha quando ESTA execução começou (ver adoptConcurrentLocation).
+  const pinAtStart = pinKey(draft.address);
   // Cliente com pedido de ENTREGA em andamento que manda um pino novo (e não está montando outro pedido): é a
   // correção do endereço — grava no pedido e avisa a equipe, em vez de recomeçar o atendimento.
   if (location && draft.cart.length === 0) {
@@ -1096,7 +1149,11 @@ export async function handleAiConversation(
   // Adicionais que o bot vende em hambúrguer/combo (bacon extra, ovo...); nulo = o bot não vende adicional.
   const extras = parseExtras(tenant.settings.botExtras);
   const cartWasEmpty = draft.cart.length === 0;
-  const prevAssistantText = lastAssistantText(data.history);
+  // Cliente que "marcou" uma mensagem (responder do WhatsApp): a citação vem na 1ª linha do texto (ver quotedReplyContext).
+  const quoteInfo = parseQuotePrefix(text);
+  const ownText = quoteInfo ? quoteInfo.own : text;
+  // Quem responde "marcando" uma pergunta da loja está respondendo A ELA — não à última mensagem do histórico.
+  const prevAssistantText = quoteInfo?.fromStore ? quoteInfo.quoted : lastAssistantText(data.history);
   // Logo depois de fechar um pedido a sessão é zerada, mas a conversa NÃO é nova: sem o wasFinalized aqui,
   // o "muito obrigada" do cliente virava "primeiro contato" (boas-vindas e aviso de loja fechada de novo).
   const firstTurn = data.history.length === 0 && !wasFinalized;
@@ -1104,8 +1161,10 @@ export async function handleAiConversation(
   // resposta NO CONTEXTO da pergunta; calculado só se algum passo precisar, e uma vez por turno.
   let acceptanceCache: boolean | undefined;
   // Só agradecer ("muito obrigada") não é aceitar a pergunta: já fechou pedido sem o cliente confirmar.
+  // "." ou "isso" marcando a pergunta da loja é um SIM a ela.
+  const acceptText = quoteInfo?.fromStore && isBareAck(quoteInfo.own) ? "sim" : ownText;
   const customerAccepted = async (): Promise<boolean> =>
-    (acceptanceCache ??= !THANKS_ONLY_RE.test(text) && (await classifyReplyToQuestion(tenantId, prevAssistantText, text)) === "accept");
+    (acceptanceCache ??= !THANKS_ONLY_RE.test(ownText) && (await classifyReplyToQuestion(tenantId, prevAssistantText, acceptText)) === "accept");
 
   // "Retirada" / "busco no balcão" soltos: o Haiku às vezes só responde e NÃO chama set_fulfillment_type — o pedido
   // seguia como entrega (taxa cobrada, ticket errado) ou ficava sem tipo e o bot perguntava de novo. Registra por código.
@@ -1811,6 +1870,9 @@ export async function handleAiConversation(
     return m;
   });
   data.history = truncateHistory(savedMessages);
+  // A localização que o cliente mandou ENQUANTO esta resposta era gerada foi salva por outra execução; sem isso, este
+  // salvamento (com o rascunho antigo, sem endereço) a apagava e o bot pedia a localização de novo.
+  await adoptConcurrentLocation(session.id, draft, pinAtStart);
   await prisma.chatSession.update({
     where: { id: session.id },
     data: { state: "AI_CONVO", data: JSON.stringify(data) },
@@ -1952,7 +2014,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
       return null;
     }
   };
-  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && text.length <= 60 && !text.includes("?") && !CHANGE_INTENT_RE.test(text) && (await customerAccepted())) {
+  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && ownText.length <= 60 && !ownText.includes("?") && !CHANGE_INTENT_RE.test(ownText) && (await customerAccepted())) {
     const auto = await autoFinalize();
     if (auto) replies = auto;
   }
@@ -1980,7 +2042,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
   if (!draft.finalizedOrderId && !activeOrders && replies.some((r) => FALSE_CONFIRMATION_RE.test(r))) {
     console.error("[ai-conversation] IA afirmou pedido confirmado sem chamar finalize_order — bloqueado.", { tenantId, phone });
     replies = [nextStepPrompt(draft)];
-    if (AFFIRM_RE.test(text) || (await customerAccepted())) {
+    if (AFFIRM_RE.test(ownText) || (await customerAccepted())) {
       const auto = await autoFinalize();
       if (auto) replies = auto;
     }
@@ -2034,7 +2096,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
   // Já aconteceu do modelo vazar o próprio raciocínio interno como texto literal pro cliente
   // ("<thinking> O cliente está confirmando que quer..."). Tira qualquer bloco desse tipo; se não
   // sobrar nada de útil na mensagem, usa a pergunta real do estado do pedido no lugar.
-  replies = replies.map((r) => stripLeakedThinking(r)).filter((r) => r.length > 0);
+  replies = stripLocationAsk(replies, draft).map((r) => stripLeakedThinking(r)).filter((r) => r.length > 0);
   if (replies.length === 0) {
     console.error("[ai-conversation] resposta inteira era vazamento de raciocínio — substituída.", { tenantId, phone });
     replies = [nextStepPrompt(draft)];
