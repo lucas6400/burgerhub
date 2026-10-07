@@ -144,6 +144,10 @@ model TenantSettings {
   // Adicionais que o bot vende em hambúrguer e combo (bacon extra, ovo...): lista { name, priceCents }.
   // Ficam só no bot (não são produtos nem adicionais do cardápio digital). Nulo = o bot não vende adicional.
   botExtras Json?
+  // Quais produtos estão no CATÁLOGO do WhatsApp Business da loja (lista de ids de Product). O carrinho do catálogo só traz
+  // quantidade + total; o bot deduz os itens procurando só entre esses produtos (whatsapp/catalog-cart.ts).
+  // Nulo = considera o cardápio inteiro.
+  botCatalogProductIds Json?
   // API oficial da Meta (Cloud API) — alternativa ao Evolution/QR acima, cada
   // tenant conecta o PRÓPRIO número via Embedded Signup (sem QR code). Até a
   // BurgerHub ter o App/Business verificados na Meta, waProvider fica sempre
