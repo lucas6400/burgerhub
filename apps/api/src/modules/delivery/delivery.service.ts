@@ -1,5 +1,4 @@
-import type { Prisma } from "@prisma/client";
-import { prisma } from "../../lib/prisma.js";
+import { prisma, type DbTransaction } from "../../lib/prisma.js";
 import { AppError } from "../../middlewares/error.js";
 import { distanceBetween, etaMinutesFor, orderStopsByNearestNeighbor } from "./route.service.js";
 import { estimateDeliveryTime, delayRisk, type DelayRisk } from "./eta.service.js";
@@ -55,7 +54,7 @@ export const DELIVERY_STATUS_LABELS: Record<DeliveryStatus, string> = {
  * não bloqueia o pedido: só não entra na Central de Despacho.
  */
 export async function createDeliveryForOrder(
-  tx: Prisma.TransactionClient,
+  tx: DbTransaction,
   params: {
     tenantId: string;
     orderId: string;
