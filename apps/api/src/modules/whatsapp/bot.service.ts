@@ -440,7 +440,7 @@ export async function handleIncoming(
         data.type = "DELIVERY";
         await save("CHECKOUT_ADDRESS");
         return [
-          "📍 Me envie sua *localização* pelo WhatsApp:\ntoque no 📎 (clipe) → *Localização* → *Enviar localização atual*.\n\nSe preferir, pode digitar o endereço (rua, número, bairro).",
+          "📍 Me envie sua *localização* pelo WhatsApp:\ntoque no 📎 (clipe) → *Localização* → *escolha o ponto da casa no mapa* (localização *fixa* — não use a atual nem a em tempo real).\n\nSe preferir, pode digitar o endereço (rua, número, bairro).",
         ];
       }
       if (["2", "retirada", "retirar", "buscar", "balcão", "balcao"].includes(lower)) {
@@ -480,7 +480,7 @@ export async function handleIncoming(
         // Texto sem pino cai num ponto "chutado" do bairro — dentro de zona desenhada
         // isso pode aceitar entrega fora da área. Sem certeza, exige a localização.
         if (!location && !quote.precise && quote.zoneName) {
-          return ["📍 Não consigo confirmar esse endereço só pelo texto. Me manda sua *localização*: toque no 📎 (clipe) → *Localização* → *Enviar localização atual*."];
+          return ["📍 Não consigo confirmar esse endereço só pelo texto. Me manda sua *localização*: toque no 📎 (clipe) → *Localização* → *escolha o ponto da casa no mapa* (localização *fixa* — não use a atual nem a em tempo real)."];
         }
         // Sem vir de localização/formato estruturado, tenta transformar o ponto
         // encontrado num endereço legível pra guardar/mostrar mais bonito.
@@ -495,7 +495,7 @@ export async function handleIncoming(
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Não consegui calcular a entrega para esse endereço.";
         return [
-          `😕 ${msg}\nPode me mandar sua 📍 *localização*? (📎 → *Localização* → *Enviar localização atual*). Se preferir, digite o endereço.`,
+          `😕 ${msg}\nPode me mandar sua 📍 *localização*? (📎 → *Localização* → *escolha o ponto da casa no mapa* (localização *fixa* — não use a atual nem a em tempo real)). Se preferir, digite o endereço.`,
         ];
       }
       await save("CHECKOUT_PAYMENT");

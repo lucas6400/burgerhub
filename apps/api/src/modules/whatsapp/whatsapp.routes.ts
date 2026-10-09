@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
+import { background } from "../../lib/background.js";
 import { h } from "../../lib/http.js";
 import { AppError } from "../../middlewares/error.js";
 import { requireAuth, requireRole, tenantOf } from "../../middlewares/auth.js";
@@ -257,7 +258,9 @@ interface WebhookBody {
     message?: {
       conversation?: string;
       extendedTextMessage?: { text?: string; contextInfo?: QuotedContext };
-      locationMessage?: { degreesLatitude?: number; degreesLongitude?: number };
+      locationMessage?: { degreesLatitude?: number; degreesLongitude?: number; name?: string; address?: string; accuracyInMeters?: number; isLive?: boolean };
+      /** Localização em TEMPO REAL: o ponto se move e expira — não serve pro entregador. */
+      liveLocationMessage?: { degreesLatitude?: number; degreesLongitude?: number; accuracyInMeters?: number };
       imageMessage?: WaRawImageMessage;
       audioMessage?: { seconds?: number; ptt?: boolean; mimetype?: string };
       /** Carrinho enviado pelo catálogo do WhatsApp Business (só traz contagem e total, não a lista de itens). */
@@ -338,6 +341,29 @@ async function handleUnsupportedMessage(tenantId: string, instance: string, phon
     console.error("Erro ao tratar mensagem não suportada do WhatsApp:", err);
   }
 }
+const LIVE_LOCATION_REPLY =
+  "Recebi sua localização em tempo real 📍, mas ela não serve pra entrega (o ponto se move e expira). Me manda a *localização fixa* da sua casa: toque no 📎 (clipe) → *Localização* → escolha o ponto da casa no mapa e envie — não use a atual nem a em tempo real. 🛵";
+
+/**
+ * Localização em TEMPO REAL não serve pro entregador (o ponto se move e some). Registra e pede a FIXA — a menos que a equipe
+ * esteja atendendo (bot pausado) ou o bot tenha acabado de mandar esse mesmo pedido.
+ */
+async function handleLiveLocationMessage(tenantId: string, instance: string, phone: string, pushName?: string) {
+  try {
+    await recordInboundMessage(tenantId, phone, `📍 Localização em tempo real recebida — não serve pra entrega (${UNSUPPORTED_MARK})`, pushName);
+    const [flags, session, asked] = await Promise.all([
+      prisma.tenantSettings.findUnique({ where: { tenantId }, select: { botEnabled: true } }),
+      prisma.chatSession.findUnique({ where: { tenantId_phone: { tenantId, phone } }, select: { botPausedUntil: true } }),
+      prisma.whatsAppMessage.findFirst({ where: { tenantId, phone, direction: "OUT", body: { startsWith: "Recebi sua localização em tempo real" }, createdAt: { gte: new Date(Date.now() - 3 * 60_000) } }, select: { id: true } }),
+    ]);
+    if (!flags?.botEnabled || (session?.botPausedUntil && session.botPausedUntil > new Date()) || asked) return;
+    await waTransport.sendText(instance, phone, LIVE_LOCATION_REPLY);
+    await recordOutboundMessage(tenantId, phone, LIVE_LOCATION_REPLY, { senderType: "BOT" });
+  } catch (err) {
+    console.error("Erro ao tratar localização em tempo real do WhatsApp:", err);
+  }
+}
+
 const MEDIA_PLACEHOLDERS = ["📍 Localização compartilhada", "🖼️ Imagem recebida", "🎤 Áudio recebido"];
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
 
@@ -440,10 +466,19 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
     return;
   }
   const loc = body.data?.message?.locationMessage;
+  if (body.data?.message?.liveLocationMessage || loc?.isLive === true) {
+    await handleLiveLocationMessage(tenantId, instance, phone, body.data?.pushName);
+    return;
+  }
   const location =
     loc?.degreesLatitude != null && loc?.degreesLongitude != null
       ? { lat: loc.degreesLatitude, lng: loc.degreesLongitude }
       : undefined;
+  // Guarda os detalhes de cada localização recebida (nome/endereço do ponto, precisão do GPS): é o que diferencia o ponto
+  // FIXO escolhido no mapa da localização "atual" — e hoje não sei como a Evolution entrega cada um.
+  if (loc && location) {
+    background(audit({ tenantId, action: "WA_LOCATION_META", entity: "WhatsAppLocation", detail: { hasName: !!loc.name, hasAddress: !!loc.address, accuracy: loc.accuracyInMeters ?? null } }));
+  }
   const img = body.data?.message?.imageMessage;
   const image = img?.url && img?.mediaKey ? { ...img, messageId: body.data?.key?.id } : undefined;
   // Legenda da foto vira o texto da mensagem (o bot lê a imagem junto com ela).

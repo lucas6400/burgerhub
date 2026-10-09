@@ -19,7 +19,7 @@ export async function answerDeliveryAreaQuery(
   // Quadra (ex.: "405 sul", "508 norte", "ARNO 41") não é reconhecida pelo mapa —
   // o resultado seria um chute no centro do bairro. Só a localização confirma.
   if (/\b\d{2,4}\s*(n|norte|s|sul|o|oeste|l|leste)\b|\b(arno|arne|arso|arse|asr|acsu)\b/i.test(neighborhood)) {
-    const confirmLine = "O valor exato e a confirmação saem pela sua 📍 localização (toque no 📎 → Localização → Enviar localização atual) — o pedido de entrega só fecha depois dela.";
+    const confirmLine = "O valor exato e a confirmação saem pela sua 📍 localização (toque no 📎 → Localização → escolha o ponto da casa no mapa — localização FIXA, não a atual nem a em tempo real) — o pedido de entrega só fecha depois dela.";
     // Texto de quadra vira um chute no mapa (já deu "grátis, 3 km" pra uma quadra a 11 km):
     // NUNCA calcula por ele — só informa a faixa cadastrada da região citada.
     const lower = neighborhood.toLowerCase();
