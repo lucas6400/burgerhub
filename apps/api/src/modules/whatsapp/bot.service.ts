@@ -3,7 +3,7 @@ import { createOrder, quoteDelivery } from "../orders/orders.service.js";
 import { reverseGeocode } from "../orders/geocoding.js";
 import { recognizeCustomerIntent } from "./ai-intent.service.js";
 import { onlinePaymentsAvailable, startPayment } from "../payments/payments.service.js";
-import { handleAiConversation } from "./ai-conversation.service.js";
+import { handleAiConversation, saveLocationWhilePaused } from "./ai-conversation.service.js";
 import { handleReceiptImage } from "./receipt-verification.service.js";
 import type { WaRawImageMessage } from "./transport.js";
 
@@ -120,7 +120,11 @@ export async function handleIncoming(
     where: { tenantId_phone: { tenantId, phone } },
   });
   // Atendente assumiu essa conversa na Central de Atendimento — bot fica calado.
-  if (session?.botPausedUntil && session.botPausedUntil > new Date()) return [];
+  if (session?.botPausedUntil && session.botPausedUntil > new Date()) {
+    // O bot fica calado, mas NÃO pode perder a localização que o cliente mandou: depois ele pediria de novo.
+    if (location && tenant.settings.aiConversationEnabled) await saveLocationWhilePaused(tenantId, session.id, session.data, location);
+    return [];
+  }
 
   // Comprovante de Pix (imagem) pra um pedido preso esperando pagamento —
   // trata ANTES de decidir entre os dois modos do bot, então funciona igual

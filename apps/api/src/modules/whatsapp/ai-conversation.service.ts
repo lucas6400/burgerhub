@@ -231,6 +231,38 @@ export function parseQuotePrefix(text: string): { fromStore: boolean; quoted: st
 /** Só pontuação ("."), ou um "isso/ok/sim" curtinho — a resposta "marcando" uma mensagem pra não precisar escrever. */
 export const isBareAck = (text: string): boolean => /^[\s.,!…👍🙏]*$/.test(text) || /^\s*(isso|esse|essa|ok|okay|sim|pode|blz|beleza|certo)[\s.!]*$/i.test(text);
 
+/**
+ * Cliente manda a localização ENQUANTO a equipe está atendendo (bot pausado): antes ela era descartada e, quando o bot
+ * voltava, pedia a localização de novo e dizia "não recebi" (aconteceu duas vezes com a mesma cliente). Guarda o pino e a
+ * taxa no rascunho, em silêncio — sem responder, sem mexer no histórico.
+ */
+export async function saveLocationWhilePaused(tenantId: string, sessionId: string, rawData: string, location: { lat: number; lng: number }): Promise<void> {
+  try {
+    const data: AiConversationData = { ...emptyData(), ...JSON.parse(rawData || "{}") };
+    const draft = data.draft;
+    if (draft.finalizedOrderId) return; // pedido já feito: a localização nova cai no fluxo de pedido ativo quando o bot voltar
+    try {
+      const quote = await quoteDelivery(tenantId, { street: "", number: "", neighborhood: "", city: "", ...location }, draftTotal(draft));
+      const reverse = await reverseGeocode(location);
+      draft.address = { ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }), neighborhood: "", lat: location.lat, lng: location.lng };
+      draft.deliveryFeeCents = quote.feeCents;
+      draft.deliveryDistanceKm = quote.distanceKm;
+      draft.type = "DELIVERY";
+      draft.rejectedPin = undefined;
+    } catch (err) {
+      if (!(err instanceof AppError && err.statusCode === 409)) throw err;
+      draft.rejectedPin = { lat: location.lat, lng: location.lng }; // fora da área
+      draft.address = undefined;
+      draft.deliveryFeeCents = undefined;
+      draft.deliveryDistanceKm = undefined;
+      if (draft.type === "DELIVERY") draft.type = undefined;
+    }
+    await prisma.chatSession.update({ where: { id: sessionId }, data: { data: JSON.stringify(data) } });
+  } catch (err) {
+    console.error("[ai-conversation] falha ao guardar a localização recebida durante o atendimento da equipe:", err);
+  }
+}
+
 const pinKey = (address: OrderDraft["address"]): string => (address?.lat != null && address?.lng != null ? `${address.lat},${address.lng}` : "");
 
 /**
@@ -1313,7 +1345,7 @@ export async function handleAiConversation(
         return [reply];
       }
     }
-    const wantsSwap = pending.mode !== "dup" && /\b(troc\w*|no lugar|em vez|ao inv[eé]s|substitu\w*|s[oó] (o|esse|essa)|apenas|somente)\b/.test(flat);
+    const wantsSwap = pending.mode !== "dup" && /\b(troc\w*|no lugar|em vez|ao inv[eé]s|substitu\w*|s[oó] (o|a|um|uma|esse|essa|1)|apenas|somente)\b/.test(flat);
     const wantsBoth = pending.mode !== "dup" && /\b(somar|soma|somando|os dois|juntos?|ambos|mais esse|tamb[eé]m)\b/.test(flat);
     const product = wantsSwap !== wantsBoth ? await prisma.product.findFirst({ where: { id: pending.productId, tenantId, available: true } }) : null;
     if (product) {
@@ -1719,8 +1751,30 @@ export async function handleAiConversation(
     take: 6,
     select: { body: true },
   });
+  // O que o CLIENTE escreveu enquanto a equipe atendia (bot pausado): o bot não viu nada disso, e voltava a perguntar o que
+  // o cliente já tinha respondido. Só mensagens depois da última fala do bot, e que não são as deste turno.
+  let unseenByBot = "";
+  if (staffMsgs.length > 0) {
+    const lastBot = await prisma.whatsAppMessage.findFirst({ where: { tenantId, phone, senderType: "BOT" }, orderBy: { createdAt: "desc" }, select: { createdAt: true } });
+    const since = new Date(Math.max(lastBot?.createdAt.getTime() ?? 0, Date.now() - 3 * 3_600_000));
+    const said = await prisma.whatsAppMessage.findMany({
+      where: { tenantId, phone, direction: "IN", createdAt: { gt: since }, NOT: { body: { contains: "o bot só lê texto, foto, áudio e localização" } } },
+      orderBy: { createdAt: "asc" },
+      take: 10,
+      select: { body: true },
+    });
+    const lines = said
+      .map((m) => m.body.replace(/\n/g, " ").slice(0, 160))
+      .filter((b) => !text.includes(b.slice(0, 40)) && !/^(📍|🖼️|🎤 Áudio recebido)/.test(b));
+    // Forma de pagamento que o cliente já disse durante o atendimento da equipe: registra antes de a IA responder.
+    if (lines.length > 0 && !draft.finalizedOrderId && draft.cart.length > 0 && !draft.paymentMethod) {
+      const spoken = extractPayment(lines.join(" "));
+      if (spoken) draft.paymentMethod = spoken;
+    }
+    if (lines.length > 0) unseenByBot = `\n\nO CLIENTE também escreveu enquanto a equipe atendia (você não tinha visto; já considere isso, não pergunte de novo o que ele já respondeu): ${lines.map((l) => `"${l}"`).join(" | ")}`;
+  }
   const staffContext = staffMsgs.length
-    ? `\n\nA EQUIPE (atendente humano) falou com este cliente há pouco — contexto do que foi combinado, respeite e NÃO contradiga (mais recente primeiro): ${staffMsgs.map((m) => `"${m.body.replace(/\n/g, " ").slice(0, 160)}"`).join(" | ")}`
+    ? `\n\nA EQUIPE (atendente humano) falou com este cliente há pouco — contexto do que foi combinado, respeite e NÃO contradiga (mais recente primeiro): ${staffMsgs.map((m) => `"${m.body.replace(/\n/g, " ").slice(0, 160)}"`).join(" | ")}. A equipe nem sempre atualiza o status no sistema: se ela disse que o entregador já saiu / está saindo / o pedido está pronto, isso VALE MAIS que o status "na fila" do sistema — responda que já saiu, nunca "ainda na fila/sendo preparado".${unseenByBot}`
     : "";
   // Pipeline V2 (atrás de flag por tenant): o Executor abaixo funciona IGUAL ao V1 (decide por
   // ferramentas e escreve um rascunho de resposta). Depois, o Redator (redator.service.ts,
@@ -2014,7 +2068,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
       return null;
     }
   };
-  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && ownText.length <= 60 && !ownText.includes("?") && !CHANGE_INTENT_RE.test(ownText) && (await customerAccepted())) {
+  if (!draft.finalizedOrderId && ASKED_CONFIRM_RE.test(prevAssistantText) && ownText.length <= 160 && !ownText.includes("?") && !CHANGE_INTENT_RE.test(ownText) && (await customerAccepted())) {
     const auto = await autoFinalize();
     if (auto) replies = auto;
   }

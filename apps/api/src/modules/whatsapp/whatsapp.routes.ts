@@ -310,13 +310,21 @@ function unwrapMessage<T extends object | undefined>(message: T): T {
 }
 
 /**
+ * Trecho fixo dos avisos "figurinha/vídeo/documento recebido". Esses registros NÃO podem contar como "a última mensagem
+ * de texto do cliente" ao juntar mensagens seguidas: uma figurinha logo depois de "Sim" / "Tem batata frita?" fazia as
+ * duas mensagens de texto serem consideradas "já respondidas pela mais nova" — e ninguém respondia nenhuma.
+ */
+const UNSUPPORTED_MARK = "o bot só lê texto, foto, áudio e localização";
+
+/**
  * Vídeo, figurinha, documento, contato etc.: o bot não lê, mas a mensagem NÃO pode sumir (antes era descartada sem
  * registro nem resposta — o cliente ficava sem retorno e a equipe nem via que ele escreveu). Registra e avisa o cliente.
  */
 async function handleUnsupportedMessage(tenantId: string, instance: string, phone: string, kinds: string[], pushName?: string) {
   try {
     const label = kinds.includes("videoMessage") ? "🎬 Vídeo" : kinds.includes("stickerMessage") ? "🙂 Figurinha" : kinds.includes("documentMessage") ? "📄 Documento" : kinds.includes("contactMessage") || kinds.includes("contactsArrayMessage") ? "👤 Contato" : "📎 Mensagem";
-    await recordInboundMessage(tenantId, phone, `${label} recebido (o bot só lê texto, foto, áudio e localização)`, pushName);
+    // O tipo técnico entra no registro pra equipe/eu sabermos o que chegou quando é "📎 Mensagem" genérica.
+    await recordInboundMessage(tenantId, phone, `${label} recebido [${kinds.slice(0, 3).join(", ")}] (${UNSUPPORTED_MARK})`, pushName);
     const [flags, session, recentOut] = await Promise.all([
       prisma.tenantSettings.findUnique({ where: { tenantId }, select: { botEnabled: true } }),
       prisma.chatSession.findUnique({ where: { tenantId_phone: { tenantId, phone } }, select: { botPausedUntil: true } }),
@@ -553,7 +561,7 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
  * mensagens recentes (3 min) pra não ressuscitar conversa antiga que o bot
  * ignorou enquanto estava pausado.
  */
-async function collectPendingText(
+export async function collectPendingText(
   tenantId: string,
   phone: string,
   inbound: { id: string; createdAt: Date },
@@ -561,7 +569,7 @@ async function collectPendingText(
 ): Promise<string | null> {
   const textOnly = { notIn: MEDIA_PLACEHOLDERS };
   const latest = await prisma.whatsAppMessage.findFirst({
-    where: { tenantId, phone, senderType: "CUSTOMER", body: textOnly },
+    where: { tenantId, phone, senderType: "CUSTOMER", body: textOnly, NOT: { body: { contains: UNSUPPORTED_MARK } } },
     orderBy: { createdAt: "desc" },
     select: { id: true },
   });
@@ -574,7 +582,7 @@ async function collectPendingText(
   });
   const since = new Date(Math.max(lastReply?.createdAt.getTime() ?? 0, inbound.createdAt.getTime() - 3 * 60_000));
   const pending = await prisma.whatsAppMessage.findMany({
-    where: { tenantId, phone, senderType: "CUSTOMER", body: textOnly, createdAt: { gt: since } },
+    where: { tenantId, phone, senderType: "CUSTOMER", body: textOnly, NOT: { body: { contains: UNSUPPORTED_MARK } }, createdAt: { gt: since } },
     orderBy: { createdAt: "asc" },
     take: 20,
     select: { body: true },
