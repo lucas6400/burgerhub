@@ -1,5 +1,6 @@
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../stores/auth";
+import { homePathFor } from "../lib/access";
 import { LandingPage } from "./Landing";
 
 /** Domínio raiz: visitante deslogado vê a página de vendas, quem já está logado cai direto no painel. */
@@ -16,5 +17,5 @@ export function Home() {
 
   if (!user) return <LandingPage />;
 
-  return <Navigate to={user.role === "COURIER" ? "/motoboy" : "/dashboard"} replace />;
+  return <Navigate to={homePathFor(user.role)} replace />;
 }

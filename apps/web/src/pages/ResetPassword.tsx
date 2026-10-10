@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { Button, Input, Field } from "../components/ui";
 import { useAuth } from "../stores/auth";
+import { homePathFor } from "../lib/access";
 
 export function ResetPasswordPage() {
   const [params] = useSearchParams();
@@ -28,7 +29,7 @@ export function ResetPasswordPage() {
         password,
       });
       setSession(data);
-      navigate(data.user.role === "COURIER" ? "/motoboy" : "/dashboard");
+      navigate(homePathFor(data.user.role));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao redefinir senha");
     } finally {

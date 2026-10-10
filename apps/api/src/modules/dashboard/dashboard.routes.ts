@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { prisma } from "../../lib/prisma.js";
 import { h } from "../../lib/http.js";
-import { requireAuth, tenantOf } from "../../middlewares/auth.js";
+import { requireAuth, requireRole, tenantOf } from "../../middlewares/auth.js";
 import { dateKeyInStoreTimezone, hourInStoreTimezone, startOfDayInStoreTimezone } from "../../utils/storeTime.js";
 
 export const dashboardRoutes = Router();
-dashboardRoutes.use(requireAuth);
+// Faturamento e gráficos: só gerente e proprietário (a tela também fica escondida pros outros cargos).
+dashboardRoutes.use(requireAuth, requireRole("MANAGER"));
 
 function daysAgo(n: number) {
   return startOfDayInStoreTimezone(n);

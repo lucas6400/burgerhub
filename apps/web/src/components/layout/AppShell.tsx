@@ -34,9 +34,10 @@ import { useAuth } from "../../stores/auth";
 import { useNewOrderAlert } from "../../hooks/useNewOrderAlert";
 import { useUnreadConversations } from "../../hooks/useUnreadConversations";
 import { useWhatsAppConnection } from "../../hooks/useWhatsAppConnection";
+import { canSeeDashboard } from "../../lib/access";
 
 const NAV_ITEMS = [
-  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, end: true },
+  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, end: true, managerOnly: true },
   { to: "/lancar", label: "Lançar venda rápida", icon: Zap, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/pdv", label: "PDV — Balcão", icon: Store },
   { to: "/mesas", label: "Mesas", icon: Table2 },
@@ -55,7 +56,7 @@ const NAV_ITEMS = [
   { to: "/cupons", label: "Cupons", icon: Tag },
   { to: "/estoque", label: "Estoque", icon: Package },
   { to: "/financeiro", label: "Financeiro", icon: Wallet },
-  { to: "/relatorios", label: "Relatórios", icon: BarChart3 },
+  { to: "/relatorios", label: "Relatórios", icon: BarChart3, managerOnly: true },
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ];
 
@@ -114,7 +115,7 @@ export function AppShell() {
 
   const nav = (
     <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-3">
-      {NAV_ITEMS.filter((item) => !item.hideForRoles?.includes(user.role)).map(({ to, label, icon: Icon, end }) => {
+      {NAV_ITEMS.filter((item) => !item.hideForRoles?.includes(user.role) && (!item.managerOnly || canSeeDashboard(user.role))).map(({ to, label, icon: Icon, end }) => {
         const kdsDisabled = to === "/kds" && !kdsEnabled;
         if (kdsDisabled) {
           return (

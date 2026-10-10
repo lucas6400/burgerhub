@@ -5,6 +5,7 @@ import { api, ApiError } from "../../lib/api";
 import { brl } from "../../lib/format";
 import { Button, Card, Toggle } from "../../components/ui";
 import { useAuth } from "../../stores/auth";
+import { homePathFor } from "../../lib/access";
 import { DRIVER_STATUS_LABELS, type DeliveryOrderSummary, type DeliveryRow, type DriverRow, type DriverStatus } from "./types";
 
 const POLL_MS = 10_000;
@@ -172,7 +173,7 @@ export function DriverAppPage() {
 
   useEffect(() => {
     if (user && user.role !== "COURIER") {
-      navigate("/dashboard");
+      navigate(homePathFor(user.role));
       return;
     }
     load();

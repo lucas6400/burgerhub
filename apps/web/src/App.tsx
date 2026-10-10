@@ -1,5 +1,6 @@
 import { Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/layout/AppShell";
+import { RequireManager } from "./components/RequireManager";
 import { Home } from "./pages/Home";
 import { LandingPage } from "./pages/Landing";
 import { LoginPage } from "./pages/Login";
@@ -49,7 +50,7 @@ export function App() {
         <Route path="/cardapio/:slug/avaliar/:orderId" element={<ReviewPage />} />
       </Route>
       <Route element={<AppShell />}>
-        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/dashboard" element={<RequireManager><DashboardPage /></RequireManager>} />
         <Route path="/pedidos" element={<OrdersPage />} />
         <Route path="/entregas" element={<DispatchBoardPage />} />
         <Route path="/entregas-metricas" element={<DeliveryAnalyticsPage />} />
@@ -68,7 +69,7 @@ export function App() {
         <Route path="/cupons" element={<CouponsPage />} />
         <Route path="/estoque" element={<StockPage />} />
         <Route path="/financeiro" element={<FinancePage />} />
-        <Route path="/relatorios" element={<ReportsPage />} />
+        <Route path="/relatorios" element={<RequireManager><ReportsPage /></RequireManager>} />
         <Route path="/configuracoes" element={<SettingsPage />} />
       </Route>
     </Routes>

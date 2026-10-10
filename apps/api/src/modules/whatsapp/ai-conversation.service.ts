@@ -1132,8 +1132,16 @@ async function runFinalize(
   if (!draft.pendingPixCode && draft.paymentMethod === "PIX") {
     pixNote = "O Pix é pago NA ENTREGA/retirada, direto com o entregador — NÃO mande chave Pix nem peça comprovante. Só se o cliente pedir pra pagar agora/adiantado (ou pedir a chave), use a ferramenta send_pix_key.";
   }
-  const paymentNote =
-    draft.paymentMethod === "CREDIT" || draft.paymentMethod === "DEBIT"
+  const isPickup = draft.type === "PICKUP";
+  const paymentNote = isPickup
+    ? draft.paymentMethod === "CREDIT" || draft.paymentMethod === "DEBIT"
+      ? "O pagamento é feito AQUI NO BALCÃO, na retirada, na maquininha — diga isso e NÃO peça pra pagar agora."
+      : draft.paymentMethod === "CASH"
+        ? "O pagamento em dinheiro é feito AQUI NO BALCÃO, na retirada — diga isso."
+        : draft.paymentMethod === "PIX"
+          ? "O Pix é pago AQUI NO BALCÃO, na retirada — diga isso."
+          : ""
+    : draft.paymentMethod === "CREDIT" || draft.paymentMethod === "DEBIT"
       ? "O pagamento no cartão é feito NA ENTREGA, na maquininha do entregador — diga isso claramente e NÃO peça pra pagar agora."
       : draft.paymentMethod === "CASH"
         ? "O pagamento é em dinheiro na entrega/retirada — diga isso."
@@ -1142,9 +1150,13 @@ async function runFinalize(
     ? "IMPORTANTE: esse pedido só entra em produção depois que o Pix for confirmado — NÃO diga que já entrou pra cozinha/produção."
     : "";
 
+  const prepRange = `${tenant.settings.defaultPrepMinutes} a ${tenant.settings.defaultPrepMinutes + 20} min`;
+  const timeNote = isPickup
+    ? `Retirada no balcão: o pedido fica pronto em ${prepRange}. Mensagem CURTA e direta (no máximo 4 linhas): número do pedido, itens e total, "retirada no balcão — fica pronto em ${prepRange}" e como paga. NÃO fale de entrega, entregador, taxa nem de "confirmação do pagamento". O pino da loja vai logo depois, sozinho.`
+    : `Tempo estimado: ${prepRange}.`;
   return (
     `Pedido #${order.number} confirmado! Total: ${brl(order.totalCents)}. ` +
-    `Tempo estimado: ${tenant.settings.defaultPrepMinutes}-${tenant.settings.defaultPrepMinutes + 20} min (a partir da confirmação do pagamento). ` +
+    `${timeNote} ` +
     `Itens: ${cartBeforeClear.map((i) => `${i.quantity}x ${i.name}`).join(", ")}. ` +
     `${pixNote} ${productionNote} ${paymentNote} Agora escreva uma mensagem calorosa pro cliente confirmando o pedido com esses dados, em português do Brasil — NÃO escreva nenhum código Pix você mesmo, ele já vai ser mandado separado.`
   );
@@ -2111,12 +2123,20 @@ ${intro.tail}`;
       await runFinalize(tenantId, phone, pushName, tenant, draft, false);
       const order = draft.finalizedOrderId ? await prisma.order.findUnique({ where: { id: draft.finalizedOrderId }, select: { number: true, totalCents: true } }) : null;
       const prep = tenant.settings.defaultPrepMinutes;
-      const payLine = payment === "PIX" ? "O Pix é pago na entrega/retirada." : payment === "CASH" ? "O pagamento é em dinheiro na entrega/retirada." : "O pagamento no cartão é feito na entrega, na maquininha.";
-      const msg = `Pedido confirmado! 🎉 *Pedido #${order?.number ?? ""}*
+      const payLine = isDelivery
+        ? payment === "PIX" ? "O Pix é pago na entrega." : payment === "CASH" ? "O pagamento é em dinheiro na entrega." : "O pagamento no cartão é feito na entrega, na maquininha."
+        : payment === "PIX" ? "Você paga o Pix aqui no balcão." : payment === "CASH" ? "Você paga em dinheiro aqui no balcão." : "Você paga no cartão aqui no balcão, na maquininha.";
+      const msg = isDelivery
+        ? `Pedido confirmado! 🎉 *Pedido #${order?.number ?? ""}*
 ${itemsText} — ${brl(order?.totalCents ?? total)}
-${isDelivery ? "Entrega" : "Retirada no balcão"} • ${prep} a ${prep + 20} min
+Entrega • ${prep} a ${prep + 20} min
 ${payLine}
-A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
+A gente te avisa quando sair. Obrigada e bom apetite! 🍔`
+        : `Pedido confirmado! 🎉 *Pedido #${order?.number ?? ""}*
+${itemsText} — ${brl(order?.totalCents ?? total)}
+Retirada no balcão — fica pronto em ${prep} a ${prep + 20} min.
+${payLine}
+Te esperamos! 🍔`;
       data.history = replaceLastAssistantText(data.history, msg);
       historySynced = true;
       await prisma.chatSession.update({ where: { id: session.id }, data: { data: JSON.stringify(data) } });

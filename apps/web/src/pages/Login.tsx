@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button, Input, Field } from "../components/ui";
 import { useAuth } from "../stores/auth";
+import { homePathFor } from "../lib/access";
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -17,7 +18,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       const user = await login(email, password);
-      navigate(user.role === "COURIER" ? "/motoboy" : "/dashboard");
+      navigate(homePathFor(user.role));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao entrar");
     } finally {
