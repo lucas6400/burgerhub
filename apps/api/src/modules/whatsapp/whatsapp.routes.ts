@@ -11,6 +11,7 @@ import { env } from "../../config/env.js";
 import { waitUntil } from "@vercel/functions";
 import { getWhatsAppSenderFor, instanceNameFor, waTransport, type WaRawImageMessage } from "./transport.js";
 import { handleIncoming } from "./bot.service.js";
+import { STORE_PIN_REPLY, sendStorePin } from "./ai-conversation.service.js";
 import { recordInboundMessage, recordOutboundMessage } from "./messages.service.js";
 import { serializeByKey } from "./request-queue.js";
 import { maybeRunFollowUpSweep } from "./followup.service.js";
@@ -568,6 +569,11 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
     try {
       const replies = await handleIncoming(tenantId, phone, textToProcess, body.data?.pushName, location, image);
       for (const reply of replies) {
+        if (reply === STORE_PIN_REPLY) {
+          // Falha no pino não pode derrubar a resposta: o texto da confirmação já foi.
+          await sendStorePin(tenantId, phone).catch((err) => console.error("Falha ao enviar o pino da loja na retirada:", err));
+          continue;
+        }
         await waTransport.sendText(instance, phone, reply);
         await recordOutboundMessage(tenantId, phone, reply, { senderType: "BOT" });
       }

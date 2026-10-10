@@ -941,7 +941,7 @@ function nextStepPrompt(draft: OrderDraft): string {
   if (!draft.paymentMethod) return "Qual a forma de pagamento? *Pix*, *dinheiro*, *crédito* ou *débito*?";
   const items = draft.cart.map((i) => `${i.quantity}x ${cartLabel(i)}`).join(", ");
   const where = draft.type === "DELIVERY" ? `Entrega em ${formatAddress(draft.address)}` : "Retirada no balcão";
-  return `Confere aí: *${items}* — ${where}. Taxa de entrega ${brl(draft.deliveryFeeCents ?? 0)}. *Total: ${brl(draftTotal(draft))}* no ${PAYMENT_LABEL[draft.paymentMethod] ?? draft.paymentMethod}. Posso confirmar? 😊`;
+  return `Confere aí: *${items}* — ${where}. Taxa de entrega ${brl(draft.deliveryFeeCents ?? 0)}. *Total: ${brl(draftTotal(draft))}* no ${PAYMENT_LABEL[draft.paymentMethod] ?? draft.paymentMethod}. *Posso confirmar?* 😊`;
 }
 
 const ASKS_FULFILLMENT_RE = /\b(entrega|retirada|retirar|buscar)\b[^.?!]*\bou\b[^.?!]*\b(entrega|retirada|retirar|buscar|retira)\b[^.?!]*\?/i;
@@ -977,6 +977,27 @@ function dropRepeatedQuestion(replies: string[], draft: OrderDraft, customerText
   console.error("[ai-conversation] Redator repetiu pergunta já respondida — removida.", { original: replies.join(" ").slice(0, 300) });
   const hasQuestion = out.some((r) => /\?\s*\S{0,3}$/.test(r.trim()));
   return hasQuestion ? out : [...out, nextStepPrompt(draft)];
+}
+
+/**
+ * A pergunta que pede o "sim" do cliente ("Posso confirmar?") sai em negrito: o cliente costuma ler o resumo e não
+ * perceber que o pedido só segue se ele responder. Não mexe no que já está entre asteriscos.
+ */
+const CONFIRM_ASK_RE = /(?<![*\w])((?:posso|podemos|pode)\s+(?:confirmar|seguir|fechar|finalizar)[^?\n*]*\?|(?:t[áa]|est[áa])\s+tudo\s+(?:certo|certinho|ok)\s*\?|confirma\s*\?)(?!\*)/gi;
+export const boldConfirmationAsk = (reply: string): string => reply.replace(CONFIRM_ASK_RE, "*$1*");
+
+/** Reply "especial" tratado por quem envia: no lugar de texto, manda o pino do mapa da loja (retirada confirmada). */
+export const STORE_PIN_REPLY = "[[PINO_DA_LOJA]]";
+
+/** Manda o pino da loja (nome + endereço) ao cliente; sem coordenadas cadastradas não faz nada. */
+export async function sendStorePin(tenantId: string, phone: string): Promise<void> {
+  const [s, tenant] = await Promise.all([
+    prisma.tenantSettings.findUnique({ where: { tenantId }, select: { storeLat: true, storeLng: true, address: true } }),
+    prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }),
+  ]);
+  if (s?.storeLat == null || s.storeLng == null) return;
+  await waTransport.sendLocation(instanceNameFor(tenantId), phone, { name: tenant?.name ?? "Loja", address: s.address ?? "", lat: s.storeLat, lng: s.storeLng });
+  await recordOutboundMessage(tenantId, phone, "📍 Localização da loja enviada", { senderType: "BOT" });
 }
 
 function menuLine(draft: OrderDraft): string {
@@ -1216,6 +1237,7 @@ export async function handleAiConversation(
   // Adicionais que o bot vende em hambúrguer/combo (bacon extra, ovo...); nulo = o bot não vende adicional.
   const extras = parseExtras(tenant.settings.botExtras);
   const cartWasEmpty = draft.cart.length === 0;
+  const finalizedBefore = draft.finalizedOrderId;
   // Cliente que "marcou" uma mensagem (responder do WhatsApp): a citação vem na 1ª linha do texto (ver quotedReplyContext).
   const quoteInfo = parseQuotePrefix(text);
   const ownText = quoteInfo ? quoteInfo.own : text;
@@ -1288,7 +1310,7 @@ export async function handleAiConversation(
       draft.deliveryDistanceKm = quote.distanceKm;
       draft.type = "DELIVERY";
       const feeText = quote.feeCents === 0 ? "entrega grátis 🎉" : brl(quote.feeCents);
-      const closing = draft.cart.length > 0 ? "Posso seguir com o seu pedido?" : "O que você vai querer pedir?";
+      const closing = draft.cart.length > 0 ? "*Posso seguir com o seu pedido?*" : "O que você vai querer pedir?";
       const replyText = `Entregamos aí ✅\nTaxa: ${feeText}\nPrevisão: aproximadamente ${quote.etaMinutes} minutos.\n${closing}`;
       // Isso decide o carrinho/endereço direto no código (nunca confia na IA
       // pra taxa/endereço), mas a IA precisa "lembrar" que isso aconteceu nas
@@ -2193,7 +2215,7 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
   }
 
   // A guarda "nunca prometa marca" só vale pras lojas sem regras de refri: com sodaRules a marca é opção real.
-  replies = (sodaRules ? replies : guardSodaBrand(text, replies, nextStepPrompt(draft))).map(neutralizeTone);
+  replies = (sodaRules ? replies : guardSodaBrand(text, replies, nextStepPrompt(draft))).map(neutralizeTone).map(boldConfirmationAsk);
 
   // O histórico guarda o rascunho da IA; se o cliente recebeu outra coisa (guardas, Redator, abertura
   // de anúncio), o próximo turno precisa partir do que foi dito de verdade — uma mentira do rascunho
@@ -2202,6 +2224,9 @@ A gente te avisa quando sair. Obrigada e bom apetite! 🍔`;
     data.history = syncFinalAssistantText(data.history, replies.join("\n\n"));
     await prisma.chatSession.update({ where: { id: session.id }, data: { data: JSON.stringify(data) } });
   }
+
+  // Retirada acabou de ser confirmada: o pino da loja vai logo depois do texto (fora do histórico da IA).
+  if (draft.finalizedOrderId && draft.finalizedOrderId !== finalizedBefore && draft.type === "PICKUP") replies.push(STORE_PIN_REPLY);
 
   return replies;
 }
