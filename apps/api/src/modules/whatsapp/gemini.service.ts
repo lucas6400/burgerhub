@@ -35,6 +35,7 @@ export async function transcribeAudio(base64: string, mimeType: string): Promise
     }
     const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
     const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("").trim() ?? "";
+    if (!text) console.error("[gemini] resposta sem texto:", JSON.stringify(json).slice(0, 300));
     if (!text || /^\[?inaud[ií]vel\]?$/i.test(text)) return null;
     return text.slice(0, 1000);
   } catch (err) {

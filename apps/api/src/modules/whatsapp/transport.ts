@@ -105,6 +105,9 @@ const mock = {
 
 // ---------------------------------------------------------------- REAL
 
+const AUDIO_DOWNLOAD_ATTEMPTS = 3;
+const AUDIO_DOWNLOAD_RETRY_MS = 1_500;
+
 async function evoFetch(path: string, options: RequestInit = {}) {
   if (!env.whatsapp.serverUrl) throw UNAVAILABLE;
   const res = await fetch(`${env.whatsapp.serverUrl}${path}`, {
@@ -258,17 +261,22 @@ const real = {
 
   /** Baixa (base64) o áudio de uma mensagem recebida, pelo ID. Nunca lança — falha vira null. */
   async downloadAudio(instance: string, messageId: string): Promise<string | null> {
-    try {
-      const res = await evoFetch(`/chat/getBase64FromMediaMessage/${instance}`, {
-        method: "POST",
-        body: JSON.stringify({ message: { key: { id: messageId } } }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { base64?: string };
-      return body.base64 ? body.base64.replace(/^data:[^;]+;base64,/, "") : null;
-    } catch (err) {
-      console.error("Falha ao baixar áudio do WhatsApp:", err);
-      return null;
+    // O webhook pode chegar antes de a Evolution gravar a mensagem (404 / sem base64): tenta de novo antes de desistir.
+    for (let attempt = 1; attempt <= AUDIO_DOWNLOAD_ATTEMPTS; attempt++) {
+      try {
+        const res = await evoFetch(`/chat/getBase64FromMediaMessage/${instance}`, {
+          method: "POST",
+          body: JSON.stringify({ message: { key: { id: messageId } } }),
+        });
+        const body = (await res.json().catch(() => ({}))) as { base64?: string };
+        if (body.base64) return body.base64.replace(/^data:[^;]+;base64,/, "");
+        console.error("[whatsapp] áudio: Evolution respondeu sem base64.", { attempt, status: res.status, body: JSON.stringify(body).slice(0, 200) });
+      } catch (err) {
+        console.error("[whatsapp] áudio: falha ao baixar da Evolution.", { attempt, err });
+      }
+      if (attempt < AUDIO_DOWNLOAD_ATTEMPTS) await new Promise((r) => setTimeout(r, AUDIO_DOWNLOAD_RETRY_MS));
     }
+    return null;
   },
 
   async listLabels(instance: string): Promise<WaLabel[]> {
