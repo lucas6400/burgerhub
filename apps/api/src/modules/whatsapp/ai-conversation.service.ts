@@ -944,6 +944,41 @@ function nextStepPrompt(draft: OrderDraft): string {
   return `Confere aí: *${items}* — ${where}. Taxa de entrega ${brl(draft.deliveryFeeCents ?? 0)}. *Total: ${brl(draftTotal(draft))}* no ${PAYMENT_LABEL[draft.paymentMethod] ?? draft.paymentMethod}. Posso confirmar? 😊`;
 }
 
+const ASKS_FULFILLMENT_RE = /\b(entrega|retirada|retirar|buscar)\b[^.?!]*\bou\b[^.?!]*\b(entrega|retirada|retirar|buscar|retira)\b[^.?!]*\?/i;
+const ASKS_PAYMENT_RE = /(forma de pagamento|\bpix\b[^.?!]*\bou\b[^.?!]*(dinheiro|cart|cr[ée]dito|d[ée]bito)|vai pagar|como (vai|quer) pagar)[^.?!]*\?/i;
+const MENTIONS_FULFILLMENT_RE = /entreg|retir|busc|troc|mud|local|endere/i;
+const MENTIONS_PAYMENT_RE = /pagar|pagamento|pix|dinheiro|cart[aã]o|cr[ée]dito|d[ée]bito|troco|troc|mud/i;
+
+/** Pedido com itens, tipo (e pino, na entrega) e pagamento definidos, ainda sem finalize: só falta o "Posso confirmar?". */
+function isReadyToConfirm(draft: OrderDraft): boolean {
+  return draft.cart.length > 0 && !!draft.type && !!draft.paymentMethod && !draft.finalizedOrderId && (draft.type === "PICKUP" || draft.address?.lat != null);
+}
+
+/**
+ * Trava final: o Redator às vezes pergunta de novo o que o cliente já respondeu ("entrega ou retirada?" depois de
+ * localização e pagamento — o cliente respondeu duas vezes e a equipe teve que assumir). Corta só a frase repetida e
+ * põe a pergunta que realmente falta pelo estado do pedido. Não mexe se o cliente acabou de falar do assunto (troca).
+ */
+function dropRepeatedQuestion(replies: string[], draft: OrderDraft, customerText: string): string[] {
+  if (draft.cart.length === 0 || draft.finalizedOrderId) return replies;
+  const checkFulfillment = !!draft.type && !MENTIONS_FULFILLMENT_RE.test(customerText);
+  const checkPayment = !!draft.paymentMethod && !MENTIONS_PAYMENT_RE.test(customerText);
+  if (!checkFulfillment && !checkPayment) return replies;
+  const stale = (s: string): boolean => (checkFulfillment && ASKS_FULFILLMENT_RE.test(s)) || (checkPayment && ASKS_PAYMENT_RE.test(s));
+  let changed = false;
+  const out = replies.map((reply) => {
+    const sentences = reply.split(/(?<=[.!?])\s+/);
+    const kept = sentences.filter((s) => !stale(s));
+    if (kept.length === sentences.length) return reply;
+    changed = true;
+    return kept.join(" ");
+  }).filter(Boolean);
+  if (!changed) return replies;
+  console.error("[ai-conversation] Redator repetiu pergunta já respondida — removida.", { original: replies.join(" ").slice(0, 300) });
+  const hasQuestion = out.some((r) => /\?\s*\S{0,3}$/.test(r.trim()));
+  return hasQuestion ? out : [...out, nextStepPrompt(draft)];
+}
+
 function menuLine(draft: OrderDraft): string {
   if (!draft.lastMenu?.length) return "";
   return `\n\nÚLTIMA LISTA NUMERADA ENVIADA AO CLIENTE (o número que ele mandar é a posição aqui): ${draft.lastMenu.map((m) => `${m.n}=${m.name}`).join("; ")}. Só vale como posição da lista uma mensagem que seja SÓ o número (ex.: "4"); "2 x tudo + refri" é QUANTIDADE (2 unidades do X Tudo), nunca o item nº 2.`;
@@ -1941,7 +1976,7 @@ export async function handleAiConversation(
     try {
       const turnActions = extractTurnActions(turnMessages);
       const customerMessage = text.trim() || (image ? "(o cliente enviou uma imagem)" : location ? "(o cliente enviou a localização)" : "");
-      const redatorModel = pickRedatorModel({ turnActions, customerMessage, image: redatorImage, draftReply: texts.join("\n") });
+      const redatorModel = pickRedatorModel({ turnActions, customerMessage, image: redatorImage, draftReply: texts.join("\n"), readyToConfirm: isReadyToConfirm(draft) });
       const composed = await composeReply({
         tenantName: tenant.name,
         catalogText: catalog,
@@ -1984,6 +2019,7 @@ export async function handleAiConversation(
   // Mesma trava no rascunho do Executor (V1 ou Redator indisponível): nunca mandar raciocínio interno.
   const sanitized = replies.map(stripMetaCommentary).filter(Boolean);
   replies = sanitized.length > 0 ? sanitized : [nextStepPrompt(draft)];
+  replies = dropRepeatedQuestion(replies, draft, text);
 
   // true quando um passo abaixo já deixou no histórico o texto que o cliente realmente recebeu.
   let historySynced = false;

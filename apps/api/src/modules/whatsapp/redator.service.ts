@@ -37,6 +37,7 @@ CONFERÊNCIA (faça antes de escrever):
 - Mensagem marcada: se a mensagem do cliente começa com "↩️ Respondeu à mensagem…", o texto entre aspas é o contexto (um "." ou "isso" repete o sentido dele). Responda ao que ele quis dizer, sem citar a marcação.
 - Localização: se o ESTADO diz que a localização do WhatsApp JÁ foi recebida, nunca peça a localização de novo.
 - Imagem de comprovante: você e o assistente NÃO conferem pagamento. Diga só que recebeu e que a equipe confere — NUNCA "Pix recebido", "pagamento confirmado" ou "caiu".
+- Nunca pergunte de novo algo que o ESTADO já tem definido: se o Tipo é entrega ou retirada, NÃO pergunte "entrega ou retirada?"; se a forma de pagamento já está no ESTADO, NÃO pergunte o pagamento. Se carrinho, tipo (e endereço, na entrega) e pagamento estão completos e finalize_order não rodou, a pergunta é só o resumo + "Posso confirmar?".
 - Nunca invente preço, endereço, chave Pix, prazo ou qualquer dado fora do CARDÁPIO, do ESTADO e do rascunho conferido. Não escreva código/chave Pix: se precisar, ele vai separado.
 
 ESTILO:
@@ -96,8 +97,11 @@ const CUSTOMER_QUESTION_RE =/\?|\b(quanto|qual|quais|como|onde|quando|quem|tem|v
  * Sonnet só quando o turno pede conferência de verdade (o pedido mudou, o cliente perguntou algo ou mandou imagem);
  * nos turnos mecânicos (forma de pagamento, tipo de entrega, "sim", localização) o Haiku reescreve igual por ~1/3 do preço.
  */
-export function pickRedatorModel(input: Pick<ComposeReplyInput, "turnActions" | "customerMessage" | "image" | "draftReply">): string {
+export function pickRedatorModel(input: Pick<ComposeReplyInput, "turnActions" | "customerMessage" | "image" | "draftReply"> & { readyToConfirm?: boolean }): string {
   if (input.image) return AI_MODEL_SONNET;
+  // Pedido completo esperando o "Posso confirmar?": é o turno do resumo — o Haiku já trocou o resumo certo do
+  // Executor por "entrega ou retirada?" (cliente já tinha escolhido e o pedido ficou travado até a equipe entrar).
+  if (input.readyToConfirm) return AI_MODEL_SONNET;
   if (input.turnActions.some((a) => ORDER_CHANGING_ACTION_RE.test(a))) return AI_MODEL_SONNET;
   // "Sim"/"ok" é o momento de confirmar o pedido, e rascunho que fala de pedido confirmado/número é o ponto onde o
   // Haiku inventou "pedido #50 confirmado" sem finalize_order (cliente esperou 30 min): sempre o modelo forte.
