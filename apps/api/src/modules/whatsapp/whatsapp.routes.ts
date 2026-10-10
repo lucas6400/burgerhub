@@ -296,10 +296,10 @@ const BOT_DEBOUNCE_MS = Number(process.env.WA_DEBOUNCE_MS ?? (env.whatsapp.mock 
 const ECHO_WAIT_MS = env.whatsapp.mock ? 0 : 3_000;
 /**
  * Depois que um humano fala com o cliente, o bot fica calado por esse tempo (renovado a cada mensagem da equipe).
- * Eram 2h: a equipe mandava um aviso e não conseguia continuar (celular quebrado, entrega) e o cliente ficava sem
- * ninguém por horas. Agora 10 min: se a equipe não continuar a conversa, o bot volta a responder na próxima mensagem do cliente.
+ * 2h: enquanto a equipe está atendendo, o bot não entra na conversa. A pausa pode ser encerrada antes
+ * pelo botão de pausa/retomar do painel de conversas.
  */
-const HUMAN_PAUSE_MS = 10 * 60_000;
+const HUMAN_PAUSE_MS = 2 * 60 * 60_000;
 
 /** Mensagens "embrulhadas" (conversa com mensagens temporárias, visualização única, legenda de documento): o conteúdo está dentro. */
 function unwrapMessage<T extends object | undefined>(message: T): T {
