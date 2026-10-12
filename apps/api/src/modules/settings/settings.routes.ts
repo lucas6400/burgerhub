@@ -8,7 +8,7 @@ import { AppError } from "../../middlewares/error.js";
 import { rateLimit } from "../../middlewares/rateLimit.js";
 import { geocodeAddress, reverseGeocode } from "../orders/geocoding.js";
 import { audit } from "../../utils/audit.js";
-import { isStoreOpenNow } from "../../utils/storeTime.js";
+import { describeOpening, isStoreOpenNow, reopeningAfterOverride } from "../../utils/storeTime.js";
 
 export const settingsRoutes = Router();
 settingsRoutes.use(requireAuth);
@@ -19,12 +19,16 @@ settingsRoutes.get(
   h(async (req, res) => {
     const tenantId = tenantOf(req);
     const [settings, hours] = await Promise.all([
-      prisma.tenantSettings.findUnique({ where: { tenantId }, select: { isOpenOverride: true } }),
+      prisma.tenantSettings.findUnique({ where: { tenantId }, select: { isOpenOverride: true, isOpenOverrideAt: true } }),
       prisma.businessHour.findMany({ where: { tenantId } }),
     ]);
+    const input = { isOpenOverride: settings?.isOpenOverride, isOpenOverrideAt: settings?.isOpenOverrideAt, businessHours: hours };
+    const reopening = reopeningAfterOverride(input);
     res.json({
-      isOpenOverride: settings?.isOpenOverride ?? null,
-      openNow: isStoreOpenNow({ isOpenOverride: settings?.isOpenOverride, businessHours: hours }),
+      // Fechamento forçado já vencido (passou a abertura seguinte) aparece como "horário normal".
+      isOpenOverride: settings?.isOpenOverride === false && !reopening && settings.isOpenOverrideAt ? null : (settings?.isOpenOverride ?? null),
+      openNow: isStoreOpenNow(input),
+      reopensAt: reopening ? describeOpening(reopening) : null,
     });
   }),
 );
@@ -205,7 +209,9 @@ settingsRoutes.put(
     // Trocar o Access Token manualmente invalida o vínculo OAuth anterior —
     // senão o split de pagamento (application_fee) tentaria usar um token que
     // não é mais de marketplace, e o Mercado Pago passaria a rejeitar a cobrança.
-    const updateData: typeof data & { mpRefreshToken?: null; mpUserId?: null } = { ...data };
+    const updateData: typeof data & { mpRefreshToken?: null; mpUserId?: null; isOpenOverrideAt?: Date | null } = { ...data };
+    // Guarda quando o botão Aberta/Fechada foi acionado: o "Fechada" forçado vence na próxima abertura do horário.
+    if (data.isOpenOverride !== undefined) updateData.isOpenOverrideAt = data.isOpenOverride === null ? null : new Date();
     if (data.mpAccessToken !== undefined) {
       updateData.mpRefreshToken = null;
       updateData.mpUserId = null;

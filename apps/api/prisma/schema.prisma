@@ -113,6 +113,7 @@ model TenantSettings {
   minOrderCents       Int     @default(0)
   freeDeliveryAbove   Int?    // centavos; null = sem frete grátis global
   isOpenOverride      Boolean? // força aberto/fechado ignorando horários
+  isOpenOverrideAt    DateTime? // quando o botão foi acionado: o "Fechada" forçado vale só até a próxima abertura do horário cadastrado
   closedMessage       String  @default("Estamos fechados no momento. Confira nossos horários!")
   paymentMethods      String  @default("PIX,CASH,CREDIT,DEBIT") // CSV: PIX,CASH,CREDIT,DEBIT,VR,VA,ONLINE
   autoPrint           Boolean @default(false)

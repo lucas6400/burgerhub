@@ -6,6 +6,8 @@ import { Card } from "./ui";
 interface StatusInfo {
   isOpenOverride: boolean | null;
   openNow: boolean;
+  /** Quando o "Forçar fechada" vence e a loja volta ao horário normal (ex.: "amanhã, terça-feira (13/10), às 18:30"). */
+  reopensAt?: string | null;
 }
 
 const OPTIONS: { value: boolean | null; label: string }[] = [
@@ -79,7 +81,7 @@ export function StoreStatusControl() {
         <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
           {status.isOpenOverride
             ? "Forçado ABERTA — ignora o horário cadastrado até você voltar pra \"Horário normal\"."
-            : "Forçado FECHADA — ignora o horário cadastrado até você voltar pra \"Horário normal\". Lembre de voltar quando reabrir!"}
+            : `Forçado FECHADA — o bot do WhatsApp e o cardápio não aceitam pedido novo${status.reopensAt ? `. Volta ao horário normal sozinha ${status.reopensAt}` : ""}. Se reabrir antes, toque em "Horário normal".`}
         </p>
       )}
     </Card>

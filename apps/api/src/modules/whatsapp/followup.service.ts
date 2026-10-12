@@ -109,7 +109,7 @@ export async function runFollowUpSweep(tenantId: string, instance: string): Prom
   });
   const settings = tenant?.settings;
   if (!tenant || !settings?.followUpEnabled || !settings.waEnabled || !settings.botEnabled) return 0;
-  if (!isStoreOpenNow({ isOpenOverride: settings.isOpenOverride, businessHours: tenant.businessHours })) return 0;
+  if (!isStoreOpenNow({ isOpenOverride: settings.isOpenOverride, isOpenOverrideAt: settings.isOpenOverrideAt, businessHours: tenant.businessHours })) return 0;
 
   const now = Date.now();
   const recent = await prisma.whatsAppMessage.findMany({

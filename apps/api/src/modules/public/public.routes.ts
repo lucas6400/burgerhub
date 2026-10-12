@@ -37,7 +37,7 @@ async function tenantBySlug(slug: string) {
 }
 
 function isOpenNow(tenant: Awaited<ReturnType<typeof tenantBySlug>>) {
-  return isStoreOpenNow({ isOpenOverride: tenant.settings?.isOpenOverride, businessHours: tenant.businessHours });
+  return isStoreOpenNow({ isOpenOverride: tenant.settings?.isOpenOverride, isOpenOverrideAt: tenant.settings?.isOpenOverrideAt, businessHours: tenant.businessHours });
 }
 
 /** Cardápio completo do estabelecimento. */

@@ -13,7 +13,7 @@ import { allowAiConversationTurn } from "./ai-conversation-throttle.js";
 import { moveLead } from "./labels.service.js";
 import { recordOutboundMessage } from "./messages.service.js";
 import { getWhatsAppSenderFor, instanceNameFor, waTransport, type WaRawImageMessage } from "./transport.js";
-import { isStoreOpenNow, nowInStoreTimezone } from "../../utils/storeTime.js";
+import { describeOpening, isStoreBlockingOrders, isStoreOpenNow, nextOpeningAfter, nowInStoreTimezone, reopeningAfterOverride } from "../../utils/storeTime.js";
 import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET, AI_MODEL_EXECUTOR } from "../ai/anthropic-client.js";
 import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
 import type { TokenUsage } from "../ai/pricing.js";
@@ -903,33 +903,41 @@ function syncFinalAssistantText(history: Anthropic.Beta.Messages.BetaMessagePara
 }
 
 /** "hoje às 18:30" / "amanhã às 18:30" / "domingo às 18:30" — próxima abertura pelo horário cadastrado. */
+type StoreHours = { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
+type OpenSettings = { isOpenOverride: boolean | null; isOpenOverrideAt?: Date | null };
+
+const openInput = (settings: OpenSettings, hours: StoreHours) => ({ isOpenOverride: settings.isOpenOverride, isOpenOverrideAt: settings.isOpenOverrideAt, businessHours: hours });
+
 /**
- * Loja fechada À FORÇA (botão "Fechado" do painel) mas ainda dentro do horário cadastrado: o dono pausou os
- * pedidos novos (ex.: cozinha sobrecarregada). Dizer "abrimos amanhã" nesse caso era falso — já aconteceu às 23:15
- * numa loja que fecha 23:30.
+ * Loja fechada DE PROPÓSITO (botão "Fechada" do painel ou dia marcado como fechado): o bot não anota nem agenda
+ * pedido novo. Fora do horário num dia normal NÃO entra aqui — aí o pedido agendado continua valendo.
  */
-function isPausedByOwner(settings: { isOpenOverride: boolean | null }, hours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[]): boolean {
-  return settings.isOpenOverride === false && isStoreOpenNow({ businessHours: hours });
+function ordersBlocked(settings: OpenSettings, hours: StoreHours): boolean {
+  return isStoreBlockingOrders(openInput(settings, hours));
 }
 
-/** Aviso de loja fechada pro cliente; o motivo (pausa do dono × fora do horário) muda o texto. */
-function storeClosedNotice(settings: { isOpenOverride: boolean | null }, hours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[]): string {
-  return isPausedByOwner(settings, hours)
-    ? "⏰ Só um aviso: no momento a loja não está recebendo novos pedidos. Mas já posso anotar o seu pra gente preparar assim que voltar! 😊"
-    : `⏰ Só um aviso: a loja está *fechada* agora — abrimos ${nextOpeningText(hours)}. Mas já posso anotar seu pedido pra gente preparar assim que abrir! 😊`;
+/** "amanhã, terça-feira (13/10), às 18:30" — quando a loja volta a atender (após o fechamento forçado ou pelo horário). */
+function reopeningText(settings: OpenSettings, hours: StoreHours): string | null {
+  const op = reopeningAfterOverride(openInput(settings, hours)) ?? nextOpeningAfter(new Date(), hours);
+  return op ? describeOpening(op) : null;
 }
 
-function nextOpeningText(hours: { weekday: number; openTime: string; closed?: boolean }[]): string {
-  const { weekday, hhmm } = nowInStoreTimezone();
-  const days = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
-  for (let offset = 0; offset < 7; offset++) {
-    const wd = (weekday + offset) % 7;
-    const h = hours.find((x) => x.weekday === wd && !x.closed);
-    if (!h) continue;
-    if (offset === 0 && hhmm >= h.openTime) continue;
-    return `${offset === 0 ? "hoje" : offset === 1 ? "amanhã" : days[wd]} às ${h.openTime}`;
-  }
-  return "no próximo horário de funcionamento";
+/** Resposta das ferramentas de pedido quando a loja está fechada de propósito (a IA repassa isso ao cliente com as próprias palavras). */
+function blockedToolMessage(settings: OpenSettings, hours: StoreHours): string {
+  const when = reopeningText(settings, hours);
+  return `A loja está FECHADA e não está recebendo pedidos novos agora — NADA foi registrado. Diga ao cliente que não dá pra anotar nem agendar pedido${when ? ` e que voltamos a atender ${when}` : ""}.`;
+}
+
+/** Resposta pronta (sem IA) a quem quer pedir com a loja fechada de propósito. */
+function blockedStoreReply(settings: OpenSettings, hours: StoreHours): string {
+  const when = reopeningText(settings, hours);
+  return `🔒 Hoje a loja está *fechada* e não está recebendo pedidos${when ? ` — voltamos a atender *${when}*` : ""}. Quando abrir é só chamar aqui que eu anoto seu pedido! 🍔`;
+}
+
+/** Aviso de loja fora do horário (dia normal): o pedido pode ser anotado pra ser preparado quando abrir. */
+function storeClosedNotice(settings: OpenSettings, hours: StoreHours): string {
+  const when = reopeningText(settings, hours);
+  return `⏰ Só um aviso: a loja está *fechada* agora${when ? ` — abrimos *${when}*` : ""}. Mas já posso anotar seu pedido pra gente preparar assim que abrir! 😊`;
 }
 
 const PAYMENT_LABEL: Record<string, string> = { PIX: "Pix", CASH: "dinheiro", DEBIT: "cartão de débito", CREDIT: "cartão de crédito" };
@@ -1005,7 +1013,7 @@ function menuLine(draft: OrderDraft): string {
   return `\n\nÚLTIMA LISTA NUMERADA ENVIADA AO CLIENTE (o número que ele mandar é a posição aqui): ${draft.lastMenu.map((m) => `${m.n}=${m.name}`).join("; ")}. Só vale como posição da lista uma mensagem que seja SÓ o número (ex.: "4"); "2 x tudo + refri" é QUANTIDADE (2 unidades do X Tudo), nunca o item nº 2.`;
 }
 
-function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOrders: string, lastOrder: string, paused: boolean): string {
+function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOrders: string, lastOrder: string, blocked: { reopens: string | null } | null): string {
   // Recalculado a cada mensagem (não fica no bloco estático/cacheado) — a
   // loja pode abrir/fechar no meio de uma conversa longa, e a IA nunca deve
   // adivinhar isso só pelo texto do horário cadastrado.
@@ -1016,13 +1024,14 @@ function buildDynamicSystemBlock(draft: OrderDraft, isOpenNow: boolean, activeOr
     : draft.finalizedOrderId
       ? ""
       : "\n\nSTATUS DO PEDIDO (verdade absoluta): NENHUM pedido deste cliente foi enviado à cozinha ainda. NUNCA diga que está confirmado, na fila, sendo preparado, saindo, a caminho ou \"vindo\" — isso só vale depois que finalize_order devolver o número do pedido. O pedido só é feito quando o cliente confirmar o resumo e você chamar finalize_order.";
+  const blockedRule = blocked
+    ? ` A loja FECHOU os pedidos novos (fechada de propósito pelo painel): NÃO anote nem agende pedido novo — nenhuma ferramenta de pedido vai funcionar. Se ele quiser pedir de novo, diga que a loja está fechada e não está recebendo pedidos${blocked.reopens ? `, e que voltamos a atender ${blocked.reopens}` : ""}.`
+    : "";
   const closedRule = isOpenNow
     ? ""
     : activeOrders
-      ? " Este cliente JÁ TEM pedido em andamento: NUNCA diga a ele que a loja está fechada nem que o pedido só sai quando abrir — o pedido dele segue normal; fale só do pedido."
-      : paused
-        ? " A loja está DENTRO do horário, mas pausou novos pedidos por ora: diga que no momento não está recebendo pedidos novos; NUNCA diga que abre amanhã."
-        : "";
+      ? ` Este cliente JÁ TEM pedido em andamento: NUNCA diga a ele que a loja está fechada nem que o pedido só sai quando abrir — o pedido dele segue normal; fale só do pedido.${blockedRule}`
+      : blockedRule;
   const openLine = `Agora é ${days[weekday]}, ${hhmm} (horário da loja). A loja está ${isOpenNow ? "ABERTA" : "FECHADA"} neste exato momento — use isso pra responder se dá pra pedir agora, nunca calcule você mesmo a partir do texto do horário.${closedRule}${activeLine}`;
 
   if (draft.cart.length === 0 && !draft.type && !draft.paymentMethod) {
@@ -1178,6 +1187,7 @@ export async function handleAiConversation(
       mpAccessToken: string | null;
       botAutoPixEnabled: boolean;
       isOpenOverride: boolean | null;
+      isOpenOverrideAt?: Date | null;
       aiPipelineV2Enabled: boolean;
       sodaRules?: unknown;
       botExtras?: unknown;
@@ -1225,6 +1235,16 @@ export async function handleAiConversation(
   }
   // Reclamação / estorno / ameaça: o bot continua respondendo, mas o dono é avisado na hora.
   if (isComplaint(text)) background(alertComplaint(tenantId, phone, pushName, text));
+
+  // Loja fechada DE PROPÓSITO (botão "Fechada" ou dia fechado): ninguém monta pedido — nem pra agendar. Quem não tem
+  // pedido em andamento recebe o aviso pronto, com o dia da semana e a data em que voltamos; quem tem segue normal.
+  const storeBlocked = ordersBlocked(tenant.settings, tenant.businessHours);
+  if (storeBlocked && !(await getActiveOrdersText(tenantId, phone))) {
+    const reply = blockedStoreReply(tenant.settings, tenant.businessHours);
+    data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
+    await prisma.chatSession.update({ where: { id: session.id }, data: { state: "AI_CONVO", data: JSON.stringify(data) } });
+    return [reply];
+  }
 
   const draft = data.draft;
   // Pino de localização que o rascunho tinha quando ESTA execução começou (ver adoptConcurrentLocation).
@@ -1365,7 +1385,7 @@ export async function handleAiConversation(
   // Não oferece "o mesmo de antes" a quem JÁ TEM pedido em andamento (já aconteceu com o #144 ainda na fila).
   if (!draft.finalizedOrderId && draft.cart.length === 0 && !draft.type && !(await getActiveOrdersText(tenantId, phone))) {
     const flat = text.replace(/\s+/g, " ").trim();
-    const storeOpenNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours });
+    const storeOpenNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, isOpenOverrideAt: tenant.settings.isOpenOverrideAt, businessHours: tenant.businessHours });
     const closedPrefix = storeOpenNow ? "" : `${storeClosedNotice(tenant.settings, tenant.businessHours)}\n\n`;
     if (draft.offeredRepeat && !CHANGE_INTENT_RE.test(flat) && (await customerAccepted())) {
       draft.offeredRepeat = undefined;
@@ -1511,6 +1531,7 @@ export async function handleAiConversation(
       notes: z.string().max(200).nullable().describe("Observação livre do cliente sobre o item (ex.: sem cebola). null se não houver."),
     }),
     run: async ({ productId, quantity, notes: rawNotes }) => {
+      if (storeBlocked && quantity > 0) throw new Error(blockedToolMessage(tenant.settings, tenant.businessHours));
       // Sem regras de refri configuradas, marca nunca vai pra observação do item (a loja decide pelo
       // estoque) — a IA já anotou "trocar por Coca" aqui e depois o pedido saiu com outra marca. Com regras
       // (sodaRules) a marca é uma escolha real do cliente e pode ir em notes (avulso) ou set_combo_soda (combo).
@@ -1692,6 +1713,7 @@ export async function handleAiConversation(
       newSeparateOrder: z.boolean().optional().describe("true SÓ se o cliente já tem pedido em andamento e confirmou claramente que quer um pedido NOVO e separado."),
     }),
     run: async ({ newSeparateOrder }) => {
+      if (storeBlocked) throw new Error(blockedToolMessage(tenant.settings, tenant.businessHours));
       // A IA já finalizou o pedido assim que o cliente disse a forma de pagamento, sem ele ter visto nem confirmado
       // o resumo completo. Só vale se a última fala do bot pediu a confirmação do resumo e o cliente aceitou.
       if (!(ASKED_CONFIRM_RE.test(prevAssistantText) && (await customerAccepted()))) {
@@ -1788,6 +1810,7 @@ export async function handleAiConversation(
       reuseAddress: z.boolean().describe("true SÓ se o último pedido foi entrega e o cliente confirmou que quer o mesmo endereço/localização. false caso contrário."),
     }),
     run: async ({ reuseAddress }) => {
+      if (storeBlocked) return blockedToolMessage(tenant.settings, tenant.businessHours);
       return repeatLastOrderInto(tenantId, phone, draft, reuseAddress);
     },
   });
@@ -1805,7 +1828,7 @@ export async function handleAiConversation(
   const tools = [updateCartItem, repeatLastOrder, requestOrderChange, askTeam, setFulfillmentType, setDeliveryAddress, checkDeliveryArea, setPaymentMethod, sendPixKey, sendStoreLocation, sendMenu, useLastAddress, finalizeOrder, ...(sodaRules ? [setComboSoda] : []), ...(extras ? [setItemExtra] : [])];
 
   const hours = hoursText(tenant.businessHours);
-  const openNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, businessHours: tenant.businessHours });
+  const openNow = isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, isOpenOverrideAt: tenant.settings.isOpenOverrideAt, businessHours: tenant.businessHours });
   const [storeAddress, generalDeliveryInfo, activeOrders, lastOrderText] = await Promise.all([
     answerStoreAddressQuestion(tenantId),
     answerGeneralDeliveryQuestion(tenantId),
@@ -1859,7 +1882,7 @@ export async function handleAiConversation(
     idleHours >= 2 && draft.cart.length > 0
       ? `\n\nO cliente ficou cerca de ${Math.round(idleHours)}h sem responder e voltou agora; o carrinho acima é de antes. Se a mensagem dele deixar claro que continua esse pedido (ex.: "sim" à pergunta da equipe ou sua, "pode seguir"), siga normalmente de onde parou. Se for vaga ou falar de outra coisa, confirme em UMA frase se ele ainda quer esse pedido antes de avançar.`
       : "";
-  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText, isPausedByOwner(tenant.settings, tenant.businessHours)) + resumeNote + menuPickNote;
+  const dynamicStateText = buildDynamicSystemBlock(draft, openNow, activeOrders, lastOrderText, storeBlocked ? { reopens: reopeningText(tenant.settings, tenant.businessHours) } : null) + resumeNote + menuPickNote;
   // Texto das regras de refri montado do cardápio real (preços avulsos) — o mesmo vai pro Executor e pro Redator.
   let sodaPolicy: string | null = null;
   if (sodaRules) {
@@ -2112,7 +2135,7 @@ ${intro.tail}`;
   // entregador saía sem o pedido existir no sistema).
   const autoFinalize = async (): Promise<string[] | null> => {
     const ready = draft.cart.length > 0 && !!draft.type && !!draft.paymentMethod && (draft.type === "PICKUP" || draft.address?.lat != null);
-    if (!ready || draft.finalizedOrderId) return null;
+    if (!ready || draft.finalizedOrderId || storeBlocked) return null;
     const extra = text.split("\n").slice(1).join(" ").trim();
     if (extra && !draft.cart[0].notes) draft.cart[0].notes = extra.slice(0, 200);
     const itemsText = draft.cart.map((i) => (i.quantity > 1 ? `${i.quantity}x ${cartLabel(i)}` : cartLabel(i))).join(" + ");

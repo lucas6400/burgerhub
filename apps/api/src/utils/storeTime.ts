@@ -28,16 +28,94 @@ export function nowInStoreTimezone(): { weekday: number; hhmm: string } {
   return { weekday: WEEKDAY_INDEX[get("weekday")], hhmm: `${get("hour")}:${get("minute")}` };
 }
 
-/** Se a loja está aberta agora — override manual do lojista tem prioridade sobre o horário cadastrado. */
-export function isStoreOpenNow(input: {
-  isOpenOverride?: boolean | null;
-  businessHours: { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
-}): boolean {
-  if (input.isOpenOverride != null) return input.isOpenOverride;
+type BusinessHourLike = { weekday: number; openTime: string; closeTime: string; closed?: boolean };
+type OpenInput = { isOpenOverride?: boolean | null; isOpenOverrideAt?: Date | null; businessHours: BusinessHourLike[] };
+
+const DAY_NAMES = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+const MS_HOUR = 3_600_000;
+
+export interface NextOpening {
+  /** Instante real da abertura. */
+  at: Date;
+  weekday: number;
+  /** Quantos dias à frente de "hoje" (0 = hoje, 1 = amanhã). */
+  daysAhead: number;
+  openTime: string;
+  /** "dd/mm" no horário da loja. */
+  dateLabel: string;
+}
+
+/** Primeira abertura do horário cadastrado DEPOIS do instante dado (dias marcados como fechados são pulados). */
+export function nextOpeningAfter(after: Date, hours: BusinessHourLike[]): NextOpening | null {
+  // Offset fixo (Brasil sem horário de verão): "relógio da loja" = UTC − 3h, tratado como se fosse UTC.
+  const localAfter = after.getTime() - STORE_UTC_OFFSET_HOURS * MS_HOUR;
+  const localNow = Date.now() - STORE_UTC_OFFSET_HOURS * MS_HOUR;
+  const base = new Date(localAfter);
+  const todayStart = Date.UTC(new Date(localNow).getUTCFullYear(), new Date(localNow).getUTCMonth(), new Date(localNow).getUTCDate());
+  for (let offset = 0; offset <= 8; offset++) {
+    const day = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + offset));
+    const h = hours.find((x) => x.weekday === day.getUTCDay() && !x.closed);
+    if (!h) continue;
+    const [hh, mm] = h.openTime.split(":").map(Number);
+    const localOpen = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hh, mm);
+    if (localOpen <= localAfter) continue;
+    return {
+      at: new Date(localOpen + STORE_UTC_OFFSET_HOURS * MS_HOUR),
+      weekday: day.getUTCDay(),
+      daysAhead: Math.round((Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()) - todayStart) / (24 * MS_HOUR)),
+      openTime: h.openTime,
+      dateLabel: `${String(day.getUTCDate()).padStart(2, "0")}/${String(day.getUTCMonth() + 1).padStart(2, "0")}`,
+    };
+  }
+  return null;
+}
+
+/** "amanhã, terça-feira (13/10), às 18:30" / "hoje, segunda-feira (12/10), às 18:30" / "sexta-feira (16/10), às 18:30". */
+export function describeOpening(op: NextOpening): string {
+  const rel = op.daysAhead === 0 ? "hoje, " : op.daysAhead === 1 ? "amanhã, " : "";
+  return `${rel}${DAY_NAMES[op.weekday]} (${op.dateLabel}), às ${op.openTime}`;
+}
+
+/**
+ * O "Fechada" forçado do painel vale só até a próxima abertura do horário cadastrado — senão a loja ficava fechada
+ * pra sempre se o dono esquecesse de voltar pro "Horário normal". Sem a data do clique (linha antiga), não expira.
+ */
+function effectiveOverride(input: OpenInput): boolean | null {
+  const { isOpenOverride, isOpenOverrideAt } = input;
+  if (isOpenOverride !== false || !isOpenOverrideAt) return isOpenOverride ?? null;
+  const reopen = nextOpeningAfter(isOpenOverrideAt, input.businessHours);
+  return reopen && reopen.at.getTime() <= Date.now() ? null : false;
+}
+
+/** Quando a loja volta a receber pedidos depois de um fechamento forçado (null = não há data prevista). */
+export function reopeningAfterOverride(input: OpenInput): NextOpening | null {
+  if (effectiveOverride(input) !== false) return null;
+  return nextOpeningAfter(input.isOpenOverrideAt ?? new Date(), input.businessHours);
+}
+
+function withinHoursNow(hours: BusinessHourLike[]): boolean {
   const { weekday, hhmm } = nowInStoreTimezone();
-  return input.businessHours.some(
-    (h) => h.weekday === weekday && !h.closed && h.openTime <= hhmm && hhmm <= h.closeTime,
-  );
+  return hours.some((h) => h.weekday === weekday && !h.closed && h.openTime <= hhmm && hhmm <= h.closeTime);
+}
+
+/** Se a loja está aberta agora — override manual do lojista tem prioridade sobre o horário cadastrado. */
+export function isStoreOpenNow(input: OpenInput): boolean {
+  const override = effectiveOverride(input);
+  if (override != null) return override;
+  return withinHoursNow(input.businessHours);
+}
+
+/**
+ * Loja FECHADA DE PROPÓSITO (não só fora do horário): botão "Fechada" do painel ou dia marcado como fechado nos
+ * horários. Aí o bot não anota nem agenda pedido. Fora do horário num dia de funcionamento continua valendo o
+ * agendamento ("anoto agora e preparamos quando abrir").
+ */
+export function isStoreBlockingOrders(input: OpenInput): boolean {
+  const override = effectiveOverride(input);
+  if (override === true) return false;
+  if (override === false) return true;
+  const { weekday } = nowInStoreTimezone();
+  return !input.businessHours.some((h) => h.weekday === weekday && !h.closed);
 }
 
 /** Minutos até a loja fechar HOJE (pelo horário cadastrado) — null se já fechada ou sem horário hoje. */
