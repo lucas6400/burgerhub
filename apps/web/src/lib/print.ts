@@ -28,20 +28,46 @@ export interface PrintTenant {
   settings?: { address?: string | null } | null;
 }
 
-/** Cabeçalho com os dados do estabelecimento, repetido em todo cupom impresso. */
+/** Texto digitado por cliente/equipe (nome, observação, endereço) vai pro HTML do cupom: escapa pra não quebrar o layout. */
+const esc = (value: string | null | undefined): string =>
+  (value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/**
+ * Cabeçalho com os dados do estabelecimento, repetido em todo cupom impresso. O telefone do cadastro da loja
+ * (tenant.phone) não sai aqui: é o número informado no cadastro da conta e não é necessariamente o da loja.
+ */
 function tenantHeader(tenant: PrintTenant): string {
   return `
-    <h2>${tenant.name}</h2>
-    ${tenant.settings?.address ? `<p style="text-align:center;font-size:11px">${tenant.settings.address}</p>` : ""}
-    ${tenant.phone ? `<p style="text-align:center;font-size:11px">${formatPhoneBR(tenant.phone)}</p>` : ""}
+    <h2>${esc(tenant.name)}</h2>
+    ${tenant.settings?.address ? `<p style="text-align:center;font-size:11px">${esc(tenant.settings.address)}</p>` : ""}
   `;
 }
 
 const RECEIPT_STYLE = `
   body { font-family: monospace; font-size: 12px; width: 280px; margin: 8px; }
   h2 { text-align: center; margin: 4px 0; } hr { border: none; border-top: 1px dashed #000; }
-  .row { display: flex; justify-content: space-between; }
+  .row { display: flex; justify-content: space-between; gap: 8px; }
+  .title { font-weight: bold; font-size: 11px; letter-spacing: 1px; margin: 6px 0 2px; }
+  .big { font-size: 28px; font-weight: bold; text-align: center; margin: 2px 0; }
+  .tag { font-size: 16px; font-weight: bold; text-align: center; border: 2px solid #000; padding: 3px 0; margin: 4px 0; }
+  .item { font-size: 14px; font-weight: bold; }
+  .sub { padding-left: 14px; }
+  .obs { padding-left: 14px; font-size: 14px; font-weight: bold; }
+  .box { border: 2px solid #000; padding: 4px 6px; margin: 6px 0; font-size: 14px; font-weight: bold; }
+  .total { font-size: 16px; font-weight: bold; }
 `;
+
+const SOURCE_LABELS: Record<string, string> = { MENU: "Cardápio online", WHATSAPP: "WhatsApp", POS: "Balcão", TABLE: "Mesa" };
+
+/** Linha de pagamento no estilo "cobrar do cliente": a equipe vê de cara se já está pago e quanto levar de troco. */
+function paymentBlock(order: Order): string {
+  const method = order.paymentMethod ? (PAYMENT_LABELS[order.paymentMethod] ?? order.paymentMethod) : null;
+  const where = order.type === "DELIVERY" ? "na entrega" : order.type === "PICKUP" ? "na retirada" : "no local";
+  const paid = order.paymentStatus === "PAID";
+  const headline = paid ? `PAGO${method ? ` (${method})` : ""}` : `COBRAR ${where.toUpperCase()}${method ? `: ${method.toUpperCase()}` : ""}`;
+  const change = !paid && order.changeForCents ? `<div>Troco para ${brl(order.changeForCents)} → levar ${brl(Math.max(order.changeForCents - order.totalCents, 0))}</div>` : "";
+  return `<div class="box">${headline}${change}</div>`;
+}
 
 /**
  * Imprime via um iframe escondido (em vez de window.open) — window.open é
@@ -90,39 +116,54 @@ function printHtml(title: string, bodyHtml: string) {
 
 /** Imprime formatado para impressora térmica (80mm). */
 export function printOrder(order: Order, tenant: PrintTenant) {
+  const isDelivery = order.type === "DELIVERY";
+  const addressLine = [order.addressStreet, order.addressNumber].filter(Boolean).join(", ");
+  const place = [addressLine, order.addressNeighborhood].filter(Boolean).join(" — ");
+  const typeLabel = (ORDER_TYPE_LABELS[order.type] ?? order.type).toUpperCase() + (order.type === "DINE_IN" && order.table ? ` — MESA ${order.table.number}` : "");
   const body = `
     ${tenantHeader(tenant)}
     <hr/>
-    <div style="text-align:center; margin:6px 0">
-      <p style="margin:0; font-size:11px; letter-spacing:1px">SENHA</p>
-      <p style="margin:0; font-size:30px; font-weight:bold">#${order.number}</p>
-    </div>
+    <div class="big">PEDIDO #${order.number}</div>
+    <div class="tag">${esc(typeLabel)}</div>
+    <p style="text-align:center;margin:2px 0">${formatDateTime(order.createdAt)}${order.source && SOURCE_LABELS[order.source] ? ` · ${SOURCE_LABELS[order.source]}` : ""}</p>
     <hr/>
-    <p style="text-align:center">${formatDateTime(order.createdAt)} — ${ORDER_TYPE_LABELS[order.type]}</p>
+    ${
+      order.customer
+        ? `<div class="title">CLIENTE</div>
+    <div style="font-size:14px;font-weight:bold">${esc(order.customer.name)}</div>
+    <div>${esc(formatPhoneBR(order.customer.phone))}</div>`
+        : ""
+    }
+    ${
+      isDelivery && place
+        ? `<div class="title">ENDEREÇO DE ENTREGA</div>
+    <div style="font-size:14px;font-weight:bold">${esc(place)}</div>
+    ${order.addressComplement ? `<div style="font-weight:bold">${esc(order.addressComplement)}</div>` : ""}
+    ${order.addressCity ? `<div>${esc(order.addressCity)}</div>` : ""}`
+        : ""
+    }
     <hr/>
+    <div class="title">ITENS</div>
     ${order.items
       .map(
         (i) => `
-      <div class="row"><span>${i.quantity}x ${i.nameSnapshot}</span><span>${brl(i.unitPriceCents * i.quantity)}</span></div>
-      ${i.addons.map((a) => `<div style="padding-left:12px">+ ${a.quantity}x ${a.nameSnapshot}</div>`).join("")}
-      ${i.removals.map((r) => `<div style="padding-left:12px">- SEM ${r.nameSnapshot}</div>`).join("")}
-      ${i.notes ? `<div style="padding-left:12px">Obs: ${i.notes}</div>` : ""}
+      <div class="row item"><span>${i.quantity}x ${esc(i.nameSnapshot)}</span><span>${brl(i.unitPriceCents * i.quantity)}</span></div>
+      ${i.addons.map((a) => `<div class="sub">+ ${a.quantity}x ${esc(a.nameSnapshot)}</div>`).join("")}
+      ${i.removals.map((r) => `<div class="obs">SEM ${esc(r.nameSnapshot)}</div>`).join("")}
+      ${i.notes ? `<div class="obs">OBS: ${esc(i.notes)}</div>` : ""}
+      <div style="height:4px"></div>
     `,
       )
       .join("")}
     <hr/>
     <div class="row"><span>Subtotal</span><span>${brl(order.subtotalCents)}</span></div>
     ${order.discountCents ? `<div class="row"><span>Desconto</span><span>-${brl(order.discountCents)}</span></div>` : ""}
-    ${order.deliveryFeeCents ? `<div class="row"><span>Entrega</span><span>${brl(order.deliveryFeeCents)}</span></div>` : ""}
-    <div class="row" style="font-weight:bold"><span>TOTAL</span><span>${brl(order.totalCents)}</span></div>
-    <hr/>
-    <p>Pagamento: ${order.paymentMethod ? PAYMENT_LABELS[order.paymentMethod] : "A COBRAR NA ENTREGA"}${order.changeForCents ? ` (troco p/ ${brl(order.changeForCents)})` : ""}</p>
-    ${order.customer ? `<p>Cliente: ${order.customer.name}<br/>Tel: ${order.customer.phone}</p>` : ""}
-    ${order.addressStreet ? `<p>Endereço: ${order.addressStreet}, ${order.addressNumber} — ${order.addressNeighborhood}${order.addressComplement ? ` (${order.addressComplement})` : ""}</p>` : ""}
-    ${order.notes ? `<p>Obs: ${order.notes}</p>` : ""}
+    ${isDelivery ? `<div class="row"><span>Taxa de entrega</span><span>${order.deliveryFeeCents ? brl(order.deliveryFeeCents) : "Grátis"}</span></div>` : ""}
+    <div class="row total"><span>TOTAL</span><span>${brl(order.totalCents)}</span></div>
+    ${paymentBlock(order)}
+    ${order.notes ? `<div class="box">OBSERVAÇÃO DO PEDIDO:<br/>${esc(order.notes)}</div>` : ""}
     <hr/>
     <p style="text-align:center; font-size:11px">Obrigado pela preferência!</p>
-    <p style="text-align:center">BurgerHub 🍔</p>
   `;
   printHtml(`Pedido #${order.number}`, body);
 }
