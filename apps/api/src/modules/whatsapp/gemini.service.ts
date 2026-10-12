@@ -25,7 +25,8 @@ export async function transcribeAudio(base64: string, mimeType: string): Promise
       body: JSON.stringify({
         contents: [{ parts: [{ text: PROMPT }, { inline_data: { mime_type: mime, data: base64 } }] }],
         // 2.5 "pensa" antes de responder e isso conta nos tokens de saída — desliga pra a transcrição não vir cortada.
-        generationConfig: { temperature: 0, maxOutputTokens: 600, ...(env.gemini.model.includes("2.5") ? { thinkingConfig: { thinkingBudget: 0 } } : {}) },
+        // Só o 2.5 aceita thinkingBudget; nos modelos novos o limite maior evita transcrição cortada se o modelo pensar um pouco.
+        generationConfig: { temperature: 0, maxOutputTokens: env.gemini.model.includes("2.5") ? 600 : 2048, ...(env.gemini.model.includes("2.5") ? { thinkingConfig: { thinkingBudget: 0 } } : {}) },
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

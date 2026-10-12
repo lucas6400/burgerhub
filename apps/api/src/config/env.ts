@@ -69,6 +69,7 @@ export const env = {
   // Transcrição de áudio do WhatsApp (Google Gemini). Sem GEMINI_API_KEY o bot só avisa que não ouve áudio.
   gemini: {
     apiKey: process.env.GEMINI_API_KEY ?? "",
-    model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+    // O Google tirou o 2.5-flash das contas/chaves novas (404 "no longer available to new users") — foi o que parou os áudios.
+    model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
   },
 };
