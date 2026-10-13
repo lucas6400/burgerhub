@@ -244,7 +244,7 @@ export async function saveLocationWhilePaused(tenantId: string, sessionId: strin
     try {
       const quote = await quoteDelivery(tenantId, { street: "", number: "", neighborhood: "", city: "", ...location }, draftTotal(draft));
       const reverse = await reverseGeocode(location);
-      draft.address = { ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }), neighborhood: "", lat: location.lat, lng: location.lng };
+      draft.address = { ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }), neighborhood: reverse?.quadra ?? "", lat: location.lat, lng: location.lng };
       draft.deliveryFeeCents = quote.feeCents;
       draft.deliveryDistanceKm = quote.distanceKm;
       draft.type = "DELIVERY";
@@ -1334,7 +1334,8 @@ export async function handleAiConversation(
       // o bairro (o campo que dava esse chute errado) fica de fora.
       draft.address = {
         ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }),
-        neighborhood: "",
+        // Só a quadra entra no lugar do bairro (o "bairro" do geocodificador erra em Palmas): ver quadras.ts.
+        neighborhood: reverse?.quadra ?? "",
         lat: location.lat,
         lng: location.lng,
       };

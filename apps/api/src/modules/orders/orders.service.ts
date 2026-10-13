@@ -827,9 +827,16 @@ async function sendOwnerOrderTicket(tenantId: string, order: OrderTicketInfo) {
     })
     .join("\n");
 
+  // Rua + número e a quadra (do pino do cliente): o despachante vê onde é sem abrir o mapa. Pino sem rua mostra só a quadra.
+  const placeText = [
+    order.addressStreet ? `${order.addressStreet}${order.addressNumber ? `, ${order.addressNumber}` : ""}` : "",
+    order.addressNeighborhood ?? "",
+  ]
+    .filter(Boolean)
+    .join(" — ");
   const addressLine =
-    order.type === "DELIVERY" && order.addressStreet
-      ? `\n📍 ${order.addressStreet}, ${order.addressNumber ?? "s/n"} — ${order.addressNeighborhood ?? ""}${order.addressComplement ? ` (${order.addressComplement})` : ""}`
+    order.type === "DELIVERY" && placeText
+      ? `\n📍 ${placeText}${order.addressComplement ? ` (${order.addressComplement})` : ""}`
       : "";
   const mapLine =
     order.type === "DELIVERY" && order.deliveryLat != null && order.deliveryLng != null

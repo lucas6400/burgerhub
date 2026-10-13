@@ -462,7 +462,7 @@ export async function handleIncoming(
         // Bairro fica de fora: em Palmas (endereço por quadra) o geocodificador
         // gratuito costuma "chutar" um distrito genérico ("103 Norte") mesmo com
         // o PINO certo — já confundiu a equipe achando que a localização veio errada.
-        address = { ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }), neighborhood: "" };
+        address = { ...(reverse ?? { street: "Localização compartilhada", number: "", neighborhood: "", city: "" }), neighborhood: reverse?.quadra ?? "" };
       } else {
         const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
         // Formato ideal é "rua, número, bairro", mas se o cliente mandar

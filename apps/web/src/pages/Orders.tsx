@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { DollarSign, MessageCircle, Printer, Search, ShoppingBag } from "lucide-react";
+import { Bike, DollarSign, MessageCircle, Printer, Search, ShoppingBag } from "lucide-react";
 import { api } from "../lib/api";
+import { DispatchRouteModal } from "../components/DispatchRouteModal";
 import { printOrder } from "../lib/print";
 import { useAuth } from "../stores/auth";
 import {
@@ -25,6 +26,9 @@ import {
   statusBadgeColor,
 } from "../components/ui";
 import type { Order } from "../types";
+
+/** Entregas que ainda podem sair com o entregador (já dá pra montar a rota enquanto o último lanche fica pronto). */
+const ROUTABLE_STATUSES = ["NEW", "PREPARING", "FINISHING", "READY", "OUT_FOR_DELIVERY"];
 
 /** Próxima etapa do pedido pra quem trabalha sem a tela de Cozinha (KDS): tudo pelo celular. */
 function nextStepFor(order: Order): { to: string; label: string } | null {
@@ -56,6 +60,8 @@ export function OrdersPage() {
   const [charging, setCharging] = useState(false);
   const [chargeError, setChargeError] = useState("");
   const [advancingId, setAdvancingId] = useState<string | null>(null);
+  const [routeIds, setRouteIds] = useState<Set<string>>(new Set());
+  const [routeOpen, setRouteOpen] = useState(false);
   const [actionError, setActionError] = useState("");
 
   /** Avança o pedido uma etapa (cada etapa avisa o cliente pelo WhatsApp) direto da lista, sem abrir o pedido. */
@@ -72,6 +78,17 @@ export function OrdersPage() {
       setAdvancingId(null);
     }
   }
+
+  function toggleRoute(id: string) {
+    setRouteIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const routeOrders = (orders ?? []).filter((o) => routeIds.has(o.id));
 
   useEffect(() => {
     setChargeMethod("PIX");
@@ -160,8 +177,17 @@ export function OrdersPage() {
           {orders.map((order) => {
             const step = order.status === "AWAITING_PAYMENT" ? null : nextStepFor(order);
             const needsCharge = step?.to === "DELIVERED" && !order.paymentMethod;
+            const routable = order.type === "DELIVERY" && ROUTABLE_STATUSES.includes(order.status);
             return (
               <div key={order.id} className="flex flex-col transition-colors hover:bg-surface-50 sm:flex-row sm:items-center sm:gap-2 sm:pr-3 dark:hover:bg-surface-850">
+                <div className="flex min-w-0 flex-1 items-center">
+                  {routable ? (
+                    <label className="flex shrink-0 items-center pl-4" title="Incluir na rota do entregador">
+                      <input type="checkbox" className="h-5 w-5 accent-brand-500" checked={routeIds.has(order.id)} onChange={() => toggleRoute(order.id)} />
+                    </label>
+                  ) : (
+                    <span className="w-9 shrink-0" />
+                  )}
                 <button onClick={() => setSelected(order)} className="flex min-w-0 flex-1 items-center gap-4 px-4 py-3 text-left">
                   <span className="w-14 shrink-0 font-semibold">#{order.number}</span>
                   <div className="min-w-0 flex-1">
@@ -174,6 +200,7 @@ export function OrdersPage() {
                   <Badge color={statusBadgeColor[order.status]}>{ORDER_STATUS_LABELS[order.status]}</Badge>
                   <span className="hidden w-24 text-right font-semibold sm:block">{brl(order.totalCents)}</span>
                 </button>
+                </div>
                 {step && (
                   <Button
                     size="sm"
@@ -190,6 +217,33 @@ export function OrdersPage() {
           })}
         </Card>
       )}
+
+      {routeIds.size > 0 && (
+        <div className="sticky bottom-3 z-10 mt-3 flex items-center justify-between gap-3 rounded-2xl bg-brand-500 px-4 py-3 text-white shadow-lg">
+          <span className="text-sm font-semibold">
+            {routeIds.size} {routeIds.size === 1 ? "entrega marcada" : "entregas marcadas"}
+          </span>
+          <div className="flex gap-2">
+            <button onClick={() => setRouteIds(new Set())} className="rounded-xl px-3 py-1.5 text-xs font-medium text-white/90 underline">
+              Limpar
+            </button>
+            <button onClick={() => setRouteOpen(true)} className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-semibold text-brand-600">
+              <Bike size={16} /> Montar rota
+            </button>
+          </div>
+        </div>
+      )}
+
+      <DispatchRouteModal
+        open={routeOpen}
+        onClose={() => setRouteOpen(false)}
+        orders={routeOrders}
+        storeName={tenant?.name ?? "Loja"}
+        onMarkedOut={(updated) => {
+          setOrders((prev) => prev?.map((o) => updated.find((u) => u.id === o.id) ?? o) ?? null);
+          setRouteIds(new Set());
+        }}
+      />
 
       <Modal open={!!selected} onClose={() => setSelected(null)} title={`Pedido #${selected?.number ?? ""}`}>
         {selected && (

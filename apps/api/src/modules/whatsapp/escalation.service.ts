@@ -203,6 +203,8 @@ export async function applyLocationToActiveOrder(tenantId: string, phone: string
       deliveryLng: location.lng,
       deliveryLocationPrecise: true,
       ...(reverse?.street ? { addressStreet: reverse.street, addressNumber: reverse.number || null } : {}),
+      // Pino novo: a quadra do endereço antigo não vale mais (vazia quando a rua já traz a quadra ou não há dado confiável).
+      addressNeighborhood: reverse?.quadra || null,
       notes: [order.notes, "📍 LOCALIZAÇÃO ATUALIZADA pelo cliente depois do pedido — use o pino novo."].filter(Boolean).join("\n"),
     },
   });

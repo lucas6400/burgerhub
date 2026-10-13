@@ -8,6 +8,8 @@
  * mantendo a mesma assinatura de `geocodeAddress`.
  */
 
+import { quadraLabelForPin } from "./quadras.js";
+
 export interface GeoPoint {
   lat: number;
   lng: number;
@@ -93,8 +95,14 @@ export async function geocodeAddress(query: string, bias?: GeoPoint): Promise<Ge
 export interface ReverseGeocodeResult {
   street: string;
   number: string;
+  /** Bairro do geocodificador: em Palmas costuma ser um distrito genérico errado — pra escrever o endereço use `quadra`. */
   neighborhood: string;
   city: string;
+  /**
+   * Quadra pra escrever no endereço do pedido ("Quadra 503 Norte (aprox.)"). Vazia quando a própria rua já traz a
+   * quadra ou quando não há dado confiável perto do pino. Não depende do Nominatim: funciona mesmo com ele fora do ar.
+   */
+  quadra: string;
 }
 
 /**
@@ -104,25 +112,31 @@ export interface ReverseGeocodeResult {
  */
 export async function reverseGeocode(point: GeoPoint): Promise<ReverseGeocodeResult | null> {
   await throttle();
+  const localOnly = (): ReverseGeocodeResult | null => {
+    const quadra = quadraLabelForPin("", point);
+    return quadra ? { street: "", number: "", neighborhood: "", city: "", quadra } : null;
+  };
   try {
     const url = `${NOMINATIM_REVERSE_URL}?format=json&lat=${point.lat}&lon=${point.lng}&addressdetails=1&zoom=18`;
     const res = await fetch(url, {
       headers: { "User-Agent": "BurgerHub/1.0 (contato@burgerhub.app)" },
     });
-    if (!res.ok) return null;
+    if (!res.ok) return localOnly();
     const body = (await res.json()) as {
       address?: Record<string, string>;
     };
     const a = body.address ?? {};
+    const street = a.road ?? a.pedestrian ?? a.residential ?? "";
     return {
-      street: a.road ?? a.pedestrian ?? a.residential ?? "",
+      street,
       number: a.house_number ?? "",
       neighborhood: a.suburb ?? a.neighbourhood ?? a.city_district ?? "",
       city: a.city ?? a.town ?? a.municipality ?? a.village ?? "",
+      quadra: quadraLabelForPin(street, point),
     };
   } catch (err) {
     console.error("Falha de rede ao geocodificar reverso:", err);
-    return null;
+    return localOnly();
   }
 }
 
