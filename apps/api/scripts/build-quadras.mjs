@@ -9,36 +9,35 @@ import { writeFileSync } from "node:fs";
 
 const MIRRORS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.private.coffee/api/interpreter"];
 const NAME = `["name"~"Quadra [0-9]+ (Norte|Sul)",i]`;
-const QUERY = `[out:json][timeout:240];
-area["name"="Palmas"]["boundary"="administrative"]->.a;
-way(area.a)${NAME}->.w;
-.w out geom tags;
-(nwr(area.a)${NAME};nwr(area.a)["addr:suburb"~"[0-9]+ (Norte|Sul)",i];nwr(area.a)["addr:street"~"Quadra [0-9]+ (Norte|Sul)",i];)->.all;
-(.all; - .w;)->.rest;
-.rest out tags center;`;
+// Duas consultas leves (a união das duas numa só estourava o servidor público): ruas com a geometria inteira, e o resto
+// (praças, endereços com a quadra) só com o ponto central.
+const HEAD = `[out:json][timeout:120];\narea["name"="Palmas"]["boundary"="administrative"]->.a;\n`;
+const QUERY_WAYS = `${HEAD}way(area.a)${NAME};\nout geom tags;`;
+const QUERY_EXTRAS = `${HEAD}(nwr(area.a)${NAME};nwr(area.a)["addr:suburb"~"[0-9]+ (Norte|Sul)",i];nwr(area.a)["addr:street"~"Quadra [0-9]+ (Norte|Sul)",i];);\nout tags center;`;
 const MIN_SPACING_M = 30;
 
-async function fetchOverpass() {
-  for (let round = 0; round < 3; round++) {
+async function fetchOverpass(query, { required }) {
+  for (let round = 0; round < (required ? 3 : 1); round++) {
     for (const url of MIRRORS) {
       try {
-        const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(QUERY), headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "BurgerHub/1.0 (contato@burgerhub.app)" }, signal: AbortSignal.timeout(280_000) });
+        const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(query), headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "BurgerHub/1.0 (contato@burgerhub.app)" }, signal: AbortSignal.timeout(150_000) });
         const text = await res.text();
         if (text.trim().startsWith("{")) return JSON.parse(text);
-        console.error(url, "respondeu algo que não é JSON:", text.slice(0, 120).replace(/\s+/g, " "));
+        console.error(url, "respondeu algo que não é JSON:", text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 160));
       } catch (err) {
         console.error(url, "falhou:", String(err).slice(0, 100));
       }
     }
-    await new Promise((r) => setTimeout(r, 5000));
+    if (required) await new Promise((r) => setTimeout(r, 5000));
   }
-  throw new Error("Nenhum espelho do Overpass respondeu");
+  if (required) throw new Error("Nenhum espelho do Overpass respondeu");
+  return { elements: [] };
 }
 
 const rad = (x) => (x * Math.PI) / 180;
 const meters = (a, b) => 2 * 6371000 * Math.asin(Math.sqrt(Math.sin(rad(b[0] - a[0]) / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(rad(b[1] - a[1]) / 2) ** 2));
 
-const data = await fetchOverpass();
+const data = { elements: [...(await fetchOverpass(QUERY_WAYS, { required: true })).elements, ...(await fetchOverpass(QUERY_EXTRAS, { required: false })).elements] };
 const byQuadra = new Map();
 const add = (key, point) => {
   const list = byQuadra.get(key) ?? [];
