@@ -181,6 +181,8 @@ model TenantSettings {
   maxDeliveryRadiusKm Float   @default(10)
   msgOrderReceived    String  @default("✅ Pedido #{n} recebido! Já estamos cuidando de tudo.")
   msgOrderPreparing   String  @default("👨‍🍳 Pedido #{n} em preparo!")
+  msgOrderReady       String  @default("✅ Pedido #{n} pronto! Já já ele sai para entrega. 🛵")
+  msgOrderReadyPickup String  @default("✅ Pedido #{n} pronto! Já pode vir retirar aqui na loja. 🍔")
   msgOrderOut         String  @default("🛵 Pedido #{n} saiu para entrega!")
   msgOrderDelivered   String  @default("🍔 Pedido #{n} entregue! Bom apetite. Avalie seu pedido: {link}")
   // Pesos do dispatch_score (JSON) — null usa DEFAULT_DISPATCH_CONFIG. Preparado

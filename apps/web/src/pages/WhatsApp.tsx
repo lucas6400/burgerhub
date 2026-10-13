@@ -21,6 +21,8 @@ interface Messages {
   msgOrderReceived: string;
   msgOrderLate: string;
   msgOrderPreparing: string;
+  msgOrderReady: string;
+  msgOrderReadyPickup: string;
   msgOrderOut: string;
   msgOrderDelivered: string;
 }
@@ -387,6 +389,18 @@ export function WhatsAppPage() {
                   <Input
                     defaultValue={messages.msgOrderPreparing}
                     onBlur={(e) => saveMessages({ msgOrderPreparing: e.target.value })}
+                  />
+                </Field>
+                <Field label="Pedido pronto — entrega">
+                  <Input
+                    defaultValue={messages.msgOrderReady}
+                    onBlur={(e) => saveMessages({ msgOrderReady: e.target.value })}
+                  />
+                </Field>
+                <Field label="Pedido pronto — retirada na loja">
+                  <Input
+                    defaultValue={messages.msgOrderReadyPickup}
+                    onBlur={(e) => saveMessages({ msgOrderReadyPickup: e.target.value })}
                   />
                 </Field>
                 <Field label="Saiu para entrega">

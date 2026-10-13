@@ -867,6 +867,8 @@ async function notifyStatusChange(tenantId: string, orderId: string, status: Ord
 
   const templates: Partial<Record<OrderStatus, string>> = {
     PREPARING: settings.msgOrderPreparing,
+    // "Pronto" avisa o cliente: pra retirada ele já pode vir buscar; pra entrega o pedido está saindo. Pedido de mesa não tem aviso.
+    READY: order.type === "PICKUP" ? settings.msgOrderReadyPickup : order.type === "DELIVERY" ? settings.msgOrderReady : "",
     OUT_FOR_DELIVERY: settings.msgOrderOut,
     DELIVERED: settings.msgOrderDelivered,
     SETTLED: settings.msgOrderDelivered,

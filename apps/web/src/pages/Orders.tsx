@@ -55,6 +55,23 @@ export function OrdersPage() {
   const [chargeChangeFor, setChargeChangeFor] = useState("");
   const [charging, setCharging] = useState(false);
   const [chargeError, setChargeError] = useState("");
+  const [advancingId, setAdvancingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
+
+  /** Avança o pedido uma etapa (cada etapa avisa o cliente pelo WhatsApp) direto da lista, sem abrir o pedido. */
+  async function advanceOrder(order: Order, to: string) {
+    setAdvancingId(order.id);
+    setActionError("");
+    try {
+      const updated = await api.patch<Order>(`/orders/${order.id}/status`, { status: to });
+      setOrders((prev) => prev?.map((o) => (o.id === order.id ? updated : o)) ?? null);
+      setSelected((cur) => (cur?.id === order.id ? updated : cur));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Não consegui atualizar o pedido");
+    } finally {
+      setAdvancingId(null);
+    }
+  }
 
   useEffect(() => {
     setChargeMethod("PIX");
@@ -122,6 +139,8 @@ export function OrdersPage() {
         </Select>
       </div>
 
+      {actionError && <p className="mb-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">{actionError}</p>}
+
       {!orders ? (
         <div className="space-y-2">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -138,24 +157,37 @@ export function OrdersPage() {
         </Card>
       ) : (
         <Card className="divide-y divide-surface-100 overflow-hidden dark:divide-surface-800">
-          {orders.map((order) => (
-            <button
-              key={order.id}
-              onClick={() => setSelected(order)}
-              className="flex w-full items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-surface-50 dark:hover:bg-surface-850"
-            >
-              <span className="w-14 shrink-0 font-semibold">#{order.number}</span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{order.customer?.name ?? "Sem cliente"}</p>
-                <p className="text-xs text-surface-400">
-                  {formatDateTime(order.createdAt)} · {ORDER_TYPE_LABELS[order.type]} ·{" "}
-                  {order.items.length} {order.items.length === 1 ? "item" : "itens"}
-                </p>
+          {orders.map((order) => {
+            const step = order.status === "AWAITING_PAYMENT" ? null : nextStepFor(order);
+            const needsCharge = step?.to === "DELIVERED" && !order.paymentMethod;
+            return (
+              <div key={order.id} className="flex flex-col transition-colors hover:bg-surface-50 sm:flex-row sm:items-center sm:gap-2 sm:pr-3 dark:hover:bg-surface-850">
+                <button onClick={() => setSelected(order)} className="flex min-w-0 flex-1 items-center gap-4 px-4 py-3 text-left">
+                  <span className="w-14 shrink-0 font-semibold">#{order.number}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{order.customer?.name ?? "Sem cliente"}</p>
+                    <p className="text-xs text-surface-400">
+                      {formatDateTime(order.createdAt)} · {ORDER_TYPE_LABELS[order.type]} ·{" "}
+                      {order.items.length} {order.items.length === 1 ? "item" : "itens"}
+                    </p>
+                  </div>
+                  <Badge color={statusBadgeColor[order.status]}>{ORDER_STATUS_LABELS[order.status]}</Badge>
+                  <span className="hidden w-24 text-right font-semibold sm:block">{brl(order.totalCents)}</span>
+                </button>
+                {step && (
+                  <Button
+                    size="sm"
+                    className="mx-4 mb-3 sm:m-0 sm:shrink-0 sm:whitespace-nowrap"
+                    disabled={needsCharge || advancingId === order.id}
+                    title={needsCharge ? "Cobre a comanda antes de concluir o pedido" : "Avança o pedido e avisa o cliente no WhatsApp"}
+                    onClick={() => advanceOrder(order, step.to)}
+                  >
+                    {step.label}
+                  </Button>
+                )}
               </div>
-              <Badge color={statusBadgeColor[order.status]}>{ORDER_STATUS_LABELS[order.status]}</Badge>
-              <span className="hidden w-24 text-right font-semibold sm:block">{brl(order.totalCents)}</span>
-            </button>
-          ))}
+            );
+          })}
         </Card>
       )}
 
@@ -365,7 +397,7 @@ export function OrdersPage() {
                         variant="secondary"
                         className="sm:flex-1"
                         disabled={!selected.paymentMethod}
-                        title={!selected.paymentMethod ? "Cobre a comanda antes de concluir o pedido" : "Fecha o pedido direto, sem passar pelas etapas"}
+                        title={!selected.paymentMethod ? "Cobre a comanda antes de concluir o pedido" : "Fecha o pedido direto, sem passar pelas etapas — o cliente só recebe o aviso de \"entregue\" (sem preparo, pronto nem saiu para entrega)"}
                         onClick={async () => {
                           const updated = await api.patch<Order>(`/orders/${selected.id}/status`, {
                             status: "DELIVERED",

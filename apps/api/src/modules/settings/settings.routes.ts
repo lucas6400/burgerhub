@@ -175,6 +175,8 @@ const settingsSchema = z.object({
   ifoodClientSecret: z.string().optional().nullable(),
   msgOrderReceived: z.string().optional(),
   msgOrderPreparing: z.string().optional(),
+  msgOrderReady: z.string().optional(),
+  msgOrderReadyPickup: z.string().optional(),
   msgOrderOut: z.string().optional(),
   msgOrderDelivered: z.string().optional(),
 });
