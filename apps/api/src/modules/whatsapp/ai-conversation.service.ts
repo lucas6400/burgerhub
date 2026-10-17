@@ -997,15 +997,33 @@ export const boldConfirmationAsk = (reply: string): string => reply.replace(CONF
 /** Reply "especial" tratado por quem envia: no lugar de texto, manda o pino do mapa da loja (retirada confirmada). */
 export const STORE_PIN_REPLY = "[[PINO_DA_LOJA]]";
 
-/** Manda o pino da loja (nome + endereço) ao cliente; sem coordenadas cadastradas não faz nada. */
+/**
+ * Manda a localização da loja: o cartão de localização do WhatsApp + o link do mapa em texto. O cartão sai sem miniatura
+ * (a Evolution só manda as coordenadas) e em alguns celulares aparece em branco, sem o pino; o link abre direto no ponto
+ * e ainda serve de reserva se o cartão falhar. Sem coordenadas cadastradas não envia nada.
+ */
+export async function deliverStorePin(tenantId: string, phone: string, storeName: string): Promise<{ sent: boolean; address: string | null }> {
+  const s = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { storeLat: true, storeLng: true, address: true } });
+  if (s?.storeLat == null || s.storeLng == null) return { sent: false, address: s?.address ?? null };
+  const instance = instanceNameFor(tenantId);
+  try {
+    await waTransport.sendLocation(instance, phone, { name: storeName, address: s.address ?? "", lat: s.storeLat, lng: s.storeLng });
+    // Registrado antes do link: o eco "fromMe" do cartão é reconhecido por este texto (senão pausaria o bot como se fosse a equipe).
+    await recordOutboundMessage(tenantId, phone, "📍 Localização da loja enviada", { senderType: "BOT" });
+  } catch (err) {
+    console.error("[whatsapp] falha ao enviar o cartão de localização da loja (segue com o link do mapa):", err);
+  }
+  // O texto exato fica registrado: o eco "fromMe" dele é comparado com isso pra não virar "a equipe respondeu".
+  const mapLink = `🗺️ Abrir no mapa, já com o pino:\nhttps://maps.google.com/?q=${s.storeLat.toFixed(6)},${s.storeLng.toFixed(6)}`;
+  await waTransport.sendText(instance, phone, mapLink);
+  await recordOutboundMessage(tenantId, phone, mapLink, { senderType: "BOT" });
+  return { sent: true, address: s.address };
+}
+
+/** Pino da loja na confirmação de retirada; sem coordenadas cadastradas não faz nada. */
 export async function sendStorePin(tenantId: string, phone: string): Promise<void> {
-  const [s, tenant] = await Promise.all([
-    prisma.tenantSettings.findUnique({ where: { tenantId }, select: { storeLat: true, storeLng: true, address: true } }),
-    prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }),
-  ]);
-  if (s?.storeLat == null || s.storeLng == null) return;
-  await waTransport.sendLocation(instanceNameFor(tenantId), phone, { name: tenant?.name ?? "Loja", address: s.address ?? "", lat: s.storeLat, lng: s.storeLng });
-  await recordOutboundMessage(tenantId, phone, "📍 Localização da loja enviada", { senderType: "BOT" });
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } });
+  await deliverStorePin(tenantId, phone, tenant?.name ?? "Loja");
 }
 
 function menuLine(draft: OrderDraft): string {
@@ -1784,11 +1802,9 @@ export async function handleAiConversation(
     description: "Envia ao cliente o PINO DO MAPA da loja (localização do WhatsApp). Use SEMPRE que o cliente perguntar onde a loja fica / o endereço / como chegar.",
     inputSchema: z.object({ confirmed: z.literal(true) }),
     run: async () => {
-      const s = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { storeLat: true, storeLng: true, address: true } });
-      if (s?.storeLat == null || s.storeLng == null) return `Não tenho o pino da loja cadastrado — responda só com o endereço escrito: ${s?.address ?? "não cadastrado"}.`;
-      await waTransport.sendLocation(instanceNameFor(tenantId), phone, { name: tenant.name, address: s.address ?? "", lat: s.storeLat, lng: s.storeLng });
-      await recordOutboundMessage(tenantId, phone, "📍 Localização da loja enviada", { senderType: "BOT" });
-      return `Pino da loja enviado. Escreva UMA frase curta com o endereço (${s.address ?? "sem endereço escrito"}) e ofereça retirada no balcão ou entrega, sem repetir o pino.`;
+      const { sent, address } = await deliverStorePin(tenantId, phone, tenant.name);
+      if (!sent) return `Não tenho o pino da loja cadastrado — responda só com o endereço escrito: ${address ?? "não cadastrado"}.`;
+      return `Localização da loja enviada (cartão do mapa + link com o pino). Escreva UMA frase curta com o endereço (${address ?? "sem endereço escrito"}) e ofereça retirada no balcão ou entrega, sem repetir o pino nem o link.`;
     },
   });
 
