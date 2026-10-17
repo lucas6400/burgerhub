@@ -9,6 +9,7 @@ import { rateLimit } from "../../middlewares/rateLimit.js";
 import { geocodeAddress, reverseGeocode } from "../orders/geocoding.js";
 import { audit } from "../../utils/audit.js";
 import { describeOpening, isStoreOpenNow, reopeningAfterOverride } from "../../utils/storeTime.js";
+import { cnpjDigits, isValidCnpj } from "../../utils/cnpj.js";
 
 export const settingsRoutes = Router();
 settingsRoutes.use(requireAuth);
@@ -142,6 +143,18 @@ const settingsSchema = z.object({
     .optional()
     .nullable(),
   customHeadScript: z.string().trim().max(5000).optional().nullable(),
+  companyLegalName: z.string().trim().max(150).optional().nullable(),
+  // Guardado só com os dígitos; vazio apaga. Valida os dígitos verificadores pra não imprimir CNPJ digitado errado.
+  companyCnpj: z
+    .string()
+    .trim()
+    .optional()
+    .nullable()
+    .refine((v) => !v || isValidCnpj(v), "CNPJ inválido — confira os 14 números")
+    .transform((v) => (v === undefined ? undefined : v ? cnpjDigits(v) : null)),
+  companyStateRegistration: z.string().trim().max(30).optional().nullable(),
+  companyMunicipalRegistration: z.string().trim().max(30).optional().nullable(),
+  companyPhone: z.string().trim().max(20).optional().nullable(),
   acceptsDelivery: z.boolean().optional(),
   acceptsPickup: z.boolean().optional(),
   acceptsDineIn: z.boolean().optional(),

@@ -9,6 +9,12 @@ interface User {
 }
 interface TenantSettings {
   address?: string | null;
+  /** Dados da empresa impressos no cupom (Configurações → Dados da empresa). */
+  companyLegalName?: string | null;
+  companyCnpj?: string | null;
+  companyStateRegistration?: string | null;
+  companyMunicipalRegistration?: string | null;
+  companyPhone?: string | null;
   kdsEnabled?: boolean;
   autoPrint?: boolean;
 }

@@ -9,6 +9,7 @@ import { ZonePolygonMap, ZONE_COLORS, type ZonePoint } from "../components/ZoneP
 import { ZonesOverviewMap } from "../components/ZonesOverviewMap";
 import { StoreStatusControl } from "../components/StoreStatusControl";
 import { ImageUploadField } from "../components/ImageUploadField";
+import { CompanyDataFields } from "../components/CompanyDataFields";
 import { isDesktopApp } from "../lib/print";
 import { disablePushNotifications, enablePushNotifications, getPushSubscriptionStatus, pushSupported } from "../lib/push";
 import { AuditLogTab } from "./settings/AuditLogTab";
@@ -35,6 +36,11 @@ interface SettingsData {
     logoUrl?: string | null;
     bannerUrl?: string | null;
     address?: string | null;
+    companyLegalName?: string | null;
+    companyCnpj?: string | null;
+    companyStateRegistration?: string | null;
+    companyMunicipalRegistration?: string | null;
+    companyPhone?: string | null;
     instagram?: string | null;
     pixKey?: string | null;
     pixReceiptExpectedName?: string | null;
@@ -467,6 +473,24 @@ export function SettingsPage() {
               placeholder="Preenchido automaticamente pelo CEP — complete com o número/lote"
             />
           </Field>
+          <CompanyDataFields
+            values={s}
+            onSave={async (patch) => {
+              // Sem atualização otimista: o servidor confere o CNPJ e o erro tem que aparecer no campo.
+              const saved = await api.put<NonNullable<SettingsData["settings"]>>("/settings", patch);
+              const fresh = {
+                companyLegalName: saved.companyLegalName,
+                companyCnpj: saved.companyCnpj,
+                companyStateRegistration: saved.companyStateRegistration,
+                companyMunicipalRegistration: saved.companyMunicipalRegistration,
+                companyPhone: saved.companyPhone,
+              };
+              setData((prev) => (prev ? { ...prev, settings: { ...prev.settings, ...fresh } } : prev));
+              updateTenantSettings(fresh);
+              setSaved(true);
+              setTimeout(() => setSaved(false), 2000);
+            }}
+          />
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Instagram">
               <Input

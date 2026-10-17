@@ -25,7 +25,19 @@ export function isDesktopApp(): boolean {
 export interface PrintTenant {
   name: string;
   phone?: string | null;
-  settings?: { address?: string | null } | null;
+  settings?: {
+    address?: string | null;
+    companyLegalName?: string | null;
+    companyCnpj?: string | null;
+    companyStateRegistration?: string | null;
+    companyMunicipalRegistration?: string | null;
+    companyPhone?: string | null;
+  } | null;
+}
+
+/** CNPJ guardado só com dígitos → XX.XXX.XXX/XXXX-XX. */
+function maskCnpj(digits: string): string {
+  return digits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 }
 
 /** Texto digitado por cliente/equipe (nome, observação, endereço) vai pro HTML do cupom: escapa pra não quebrar o layout. */
@@ -37,9 +49,19 @@ const esc = (value: string | null | undefined): string =>
  * (tenant.phone) não sai aqui: é o número informado no cadastro da conta e não é necessariamente o da loja.
  */
 function tenantHeader(tenant: PrintTenant): string {
+  const s = tenant.settings;
+  const small = (text: string) => `<p style="text-align:center;font-size:11px;margin:1px 0">${esc(text)}</p>`;
+  const registrations = [
+    s?.companyCnpj ? `CNPJ ${maskCnpj(s.companyCnpj)}` : "",
+    s?.companyStateRegistration ? `IE ${s.companyStateRegistration}` : "",
+    s?.companyMunicipalRegistration ? `IM ${s.companyMunicipalRegistration}` : "",
+  ].filter(Boolean);
   return `
     <h2>${esc(tenant.name)}</h2>
-    ${tenant.settings?.address ? `<p style="text-align:center;font-size:11px">${esc(tenant.settings.address)}</p>` : ""}
+    ${s?.companyLegalName && s.companyLegalName !== tenant.name ? small(s.companyLegalName) : ""}
+    ${registrations.length > 0 ? small(registrations.join(" · ")) : ""}
+    ${s?.address ? small(s.address) : ""}
+    ${s?.companyPhone ? small(formatPhoneBR(s.companyPhone)) : ""}
   `;
 }
 
@@ -164,6 +186,7 @@ export function printOrder(order: Order, tenant: PrintTenant) {
     ${order.notes ? `<div class="box">OBSERVAÇÃO DO PEDIDO:<br/>${esc(order.notes)}</div>` : ""}
     <hr/>
     <p style="text-align:center; font-size:11px">Obrigado pela preferência!</p>
+    <p style="text-align:center; font-size:10px; margin:2px 0">Comprovante do pedido — não é documento fiscal</p>
   `;
   printHtml(`Pedido #${order.number}`, body);
 }

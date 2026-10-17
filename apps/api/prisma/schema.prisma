@@ -89,6 +89,12 @@ model TenantSettings {
   bannerUrl           String?
   primaryColor        String  @default("#f59e0b")
   address             String?
+  // Dados da empresa para documentos (cupom impresso): razão social, CNPJ (só dígitos), inscrições e telefone da loja.
+  companyLegalName    String?
+  companyCnpj         String?
+  companyStateRegistration String?
+  companyMunicipalRegistration String?
+  companyPhone        String?
   instagram           String?
   facebook            String?
   pixKey              String?

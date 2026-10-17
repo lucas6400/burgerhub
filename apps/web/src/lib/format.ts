@@ -29,6 +29,16 @@ export function formatPhoneBR(value: string): string {
   return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7, 11)}`;
 }
 
+/** Formata dígitos como CNPJ: XX.XXX.XXX/XXXX-XX (aceita qualquer string, com ou sem máscara). */
+export function formatCnpj(value: string): string {
+  const d = value.replace(/\D/g, "").slice(0, 14);
+  if (d.length <= 2) return d;
+  if (d.length <= 5) return `${d.slice(0, 2)}.${d.slice(2)}`;
+  if (d.length <= 8) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5)}`;
+  if (d.length <= 12) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8)}`;
+  return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
+}
+
 /** Formata dígitos como CEP: XXXXX-XXX. Recebe qualquer string (com ou sem máscara). */
 export function formatCep(value: string): string {
   const d = value.replace(/\D/g, "").slice(0, 8);
