@@ -24,11 +24,38 @@ interface HeatPoint {
   lng: number;
 }
 
+/** Pedido de entrega que acabou de chegar / está na cozinha (ainda sem entrega criada): já aparece no mapa. */
+export interface PendingStop {
+  id: string;
+  number: number;
+  lat: number;
+  lng: number;
+  /** Texto do balão: cliente + endereço/quadra. */
+  label: string;
+  status: string;
+  /** Posição na rota planejada (1, 2, 3…) quando o pedido está marcado pra sair; senão undefined. */
+  routeIndex?: number;
+}
+
+const PENDING_NEW_ICON = emojiIcon("🍔", "#64748b");
+const PENDING_PREPARING_ICON = emojiIcon("🔥", "#f59e0b");
+const numberedIcon = (n: number) =>
+  L.divIcon({
+    html: `<div style="background:#2563eb;color:white;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;box-shadow:0 1px 5px rgba(0,0,0,.4);border:2px solid white">${n}</div>`,
+    className: "",
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+  });
+
 interface Props {
   storeLat?: number | null;
   storeLng?: number | null;
   drivers: DriverRow[];
   deliveries: DeliveryRow[];
+  /** Pedidos que chegaram e ainda não viraram entrega (cozinha) + os marcados pra rota, numerados na ordem planejada. */
+  pendingOrders?: PendingStop[];
+  /** Caminho planejado loja → paradas marcadas (linha tracejada azul). */
+  plannedPath?: [number, number][];
   onSelectDelivery?: (delivery: DeliveryRow) => void;
   onSelectDriver?: (driver: DriverRow) => void;
   heatPoints?: HeatPoint[];
@@ -49,6 +76,8 @@ export function DeliveryMap({
   storeLng,
   drivers,
   deliveries,
+  pendingOrders,
+  plannedPath,
   onSelectDelivery,
   onSelectDriver,
   heatPoints,
@@ -163,7 +192,18 @@ export function DeliveryMap({
       for (const s of stops) points.push([s.destinationLat as number, s.destinationLng as number]);
       L.polyline(points, { color: colorForDriver(driverId), weight: 3, dashArray: "6 6", opacity: 0.8 }).addTo(routesLayer);
     }
-  }, [storeLat, storeLng, drivers, deliveries]);
+
+    // Pedidos que acabaram de chegar: o despachante já enxerga onde cada um fica e a ordem planejada da saída.
+    for (const p of pendingOrders ?? []) {
+      const icon = p.routeIndex != null ? numberedIcon(p.routeIndex) : p.status === "NEW" ? PENDING_NEW_ICON : PENDING_PREPARING_ICON;
+      L.marker([p.lat, p.lng], { icon, zIndexOffset: p.routeIndex != null ? 500 : 0 })
+        .bindTooltip(`Pedido #${p.number}${p.routeIndex != null ? ` · parada ${p.routeIndex}` : ""} · ${p.label}`)
+        .addTo(layer);
+    }
+    if (plannedPath && plannedPath.length > 1) {
+      L.polyline(plannedPath, { color: "#2563eb", weight: 4, dashArray: "8 8", opacity: 0.9 }).addTo(routesLayer);
+    }
+  }, [storeLat, storeLng, drivers, deliveries, pendingOrders, plannedPath]);
 
   // Camada de calor — histórico de pontos de entrega (item de heatmap, Fase 2). Independente do polling em tempo real.
   useEffect(() => {

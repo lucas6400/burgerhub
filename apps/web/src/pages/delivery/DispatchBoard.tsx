@@ -1,14 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Bike, Clock, Flame, MapPin, Maximize2, Minimize2, PackageCheck, Route, ShoppingBag, Truck } from "lucide-react";
 import { api } from "../../lib/api";
-import { brl, timeAgo } from "../../lib/format";
-import { Badge, Button, Card, EmptyState, Modal, PageHeader, Skeleton } from "../../components/ui";
-import { DeliveryMap } from "../../components/delivery/DeliveryMap";
+import { brl, ORDER_STATUS_LABELS, timeAgo } from "../../lib/format";
+import { planRoute } from "../../lib/route";
+import { placeLabel } from "../../lib/dispatch";
+import type { Order } from "../../types";
+import { Badge, Button, Card, EmptyState, Modal, PageHeader, Skeleton, statusBadgeColor } from "../../components/ui";
+import { DeliveryMap, type PendingStop } from "../../components/delivery/DeliveryMap";
+import { DispatchRouteModal } from "../../components/DispatchRouteModal";
+import { useAuth } from "../../stores/auth";
 import { DispatchModal } from "../../components/delivery/DispatchModal";
 import { DeliveryStatusBadge, DelayRiskBadge } from "../../components/delivery/DeliveryStatusBadge";
 import { DRIVER_STATUS_LABELS, type DispatchBoardData, type DeliveryRow, type DriverRow, type GroupingOpportunity } from "./types";
 
 const POLL_MS = 15_000;
+/** Pedidos de entrega que a cozinha ainda está fazendo ou que acabaram de ficar prontos: já entram no planejamento da rota. */
+const PLANNABLE_STATUSES = ["NEW", "PREPARING", "FINISHING", "READY"];
 
 interface HeatPoint {
   lat: number;
@@ -38,6 +45,10 @@ function StatTile({ icon: Icon, label, value, tone }: { icon: typeof ShoppingBag
 }
 
 export function DispatchBoardPage() {
+  const { tenant } = useAuth();
+  const [incoming, setIncoming] = useState<Order[]>([]);
+  const [routeIds, setRouteIds] = useState<Set<string>>(new Set());
+  const [routeOpen, setRouteOpen] = useState(false);
   const [board, setBoard] = useState<DispatchBoardData | null>(null);
   const [store, setStore] = useState<{ lat: number | null; lng: number | null } | null>(null);
   const [dispatchTarget, setDispatchTarget] = useState<DeliveryRow | null>(null);
@@ -86,6 +97,11 @@ export function DispatchBoardPage() {
       .get<GroupingOpportunity[]>("/deliveries/grouping-opportunities")
       .then(setOpportunities)
       .catch(() => setOpportunities([]));
+    // Pedidos de entrega desde a chegada (a entrega só nasce quando o pedido fica pronto, mas o despachante já quer ver a rota).
+    api
+      .get<Order[]>("/orders?active=true")
+      .then((list) => setIncoming(list.filter((o) => o.type === "DELIVERY" && PLANNABLE_STATUSES.includes(o.status)).sort((a, b) => a.createdAt.localeCompare(b.createdAt))))
+      .catch(() => {});
   }
 
   useEffect(() => {
@@ -97,6 +113,38 @@ export function DispatchBoardPage() {
     const interval = setInterval(load, POLL_MS);
     return () => clearInterval(interval);
   }, []);
+
+  // Rota planejada dos pedidos marcados (mais próximo primeiro a partir da loja) + marcadores dos pedidos que chegaram.
+  const { pendingStops, plannedPath, routeOrders } = useMemo(() => {
+    const withPoint = incoming.filter((o) => o.deliveryLat != null && o.deliveryLng != null);
+    const selected = withPoint.filter((o) => routeIds.has(o.id)).map((o) => ({ order: o, point: { lat: o.deliveryLat!, lng: o.deliveryLng! } }));
+    const origin = store?.lat != null && store.lng != null ? { lat: store.lat, lng: store.lng } : selected[0]?.point;
+    const ordered = origin ? planRoute(origin, selected) : selected;
+    const indexById = new Map(ordered.map((s, i) => [s.order.id, i + 1]));
+    const hasDelivery = new Set((board ? [...board.awaitingDispatch, ...board.onRoute] : []).map((d) => d.order.number));
+    const stops: PendingStop[] = withPoint
+      .filter((o) => indexById.has(o.id) || !hasDelivery.has(o.number))
+      .map((o) => ({
+        id: o.id,
+        number: o.number,
+        lat: o.deliveryLat!,
+        lng: o.deliveryLng!,
+        label: `${o.customer?.name ?? "Cliente"} · ${placeLabel(o) || "ver o pino"}`,
+        status: o.status,
+        routeIndex: indexById.get(o.id),
+      }));
+    const path: [number, number][] | undefined = origin && ordered.length > 0 ? [[origin.lat, origin.lng], ...ordered.map((s): [number, number] => [s.point.lat, s.point.lng])] : undefined;
+    return { pendingStops: stops, plannedPath: path, routeOrders: incoming.filter((o) => routeIds.has(o.id)) };
+  }, [incoming, routeIds, store, board]);
+
+  function toggleRoute(id: string) {
+    setRouteIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   if (error) {
     return (
@@ -184,8 +232,57 @@ export function DispatchBoardPage() {
       )}
 
       <div className={`grid gap-4 lg:grid-cols-[340px_1fr_320px] ${isFullscreen ? "flex-1 lg:overflow-hidden" : ""}`}>
+        <div className={isFullscreen ? "flex h-full flex-col gap-4 overflow-y-auto" : "space-y-4"}>
+        {/* Pedidos de entrega desde a chegada: marque os que vão juntos e veja a rota no mapa */}
+        <Card className="p-3">
+          <div className="mb-2 flex items-center justify-between gap-2 px-1">
+            <h3 className="text-sm font-semibold">Pedidos chegando</h3>
+            {routeIds.size > 0 && (
+              <button onClick={() => setRouteIds(new Set())} className="text-xs text-surface-400 underline">
+                Limpar
+              </button>
+            )}
+          </div>
+          {incoming.length === 0 ? (
+            <p className="px-1 py-4 text-center text-xs text-surface-400">Nenhum pedido de entrega em andamento.</p>
+          ) : (
+            <div className="max-h-72 space-y-2 overflow-y-auto">
+              {incoming.map((o) => {
+                const hasPin = o.deliveryLat != null && o.deliveryLng != null;
+                return (
+                  <label key={o.id} className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-surface-200 p-2.5 dark:border-surface-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-brand-500"
+                      checked={routeIds.has(o.id)}
+                      onChange={() => toggleRoute(o.id)}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold">#{o.number}</span>
+                        <Badge color={statusBadgeColor[o.status]}>{ORDER_STATUS_LABELS[o.status]}</Badge>
+                      </div>
+                      <p className="truncate text-xs text-surface-500">
+                        {o.customer?.name ?? "Cliente"} · {brl(o.totalCents)}
+                      </p>
+                      <p className="flex items-center gap-1 text-[11px] text-surface-400">
+                        <MapPin size={11} /> {placeLabel(o) || (hasPin ? "Só o pino do mapa" : "⚠️ Sem endereço nem pino")} · chegou {timeAgo(o.createdAt)}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          {routeIds.size > 0 && (
+            <Button className="mt-3 w-full" onClick={() => setRouteOpen(true)}>
+              <Route size={15} /> Montar rota ({routeIds.size})
+            </Button>
+          )}
+        </Card>
+
         {/* Fila aguardando despacho */}
-        <Card className={isFullscreen ? "h-full overflow-y-auto p-3" : "max-h-80 overflow-y-auto p-3 lg:max-h-[70vh]"}>
+        <Card className={isFullscreen ? "min-h-0 flex-1 overflow-y-auto p-3" : "max-h-80 overflow-y-auto p-3 lg:max-h-[70vh]"}>
           <h3 className="mb-2 px-1 text-sm font-semibold">Aguardando despacho</h3>
           {board.awaitingDispatch.length === 0 ? (
             <EmptyState icon={<PackageCheck size={22} />} title="Tudo despachado" description="Nenhum pedido pronto esperando entregador." />
@@ -217,6 +314,7 @@ export function DispatchBoardPage() {
             </div>
           )}
         </Card>
+        </div>
 
         {/* Mapa */}
         <Card className={isFullscreen ? "h-full p-2" : "p-2"}>
@@ -225,6 +323,8 @@ export function DispatchBoardPage() {
             storeLng={store?.lng}
             drivers={board.drivers}
             deliveries={allDeliveries}
+            pendingOrders={pendingStops}
+            plannedPath={plannedPath}
             onSelectDelivery={(d) => (d.status === "AWAITING_DRIVER" ? setDispatchTarget(d) : undefined)}
             heatPoints={heatPoints ?? undefined}
             showHeatmap={showHeatmap}
@@ -300,6 +400,17 @@ export function DispatchBoardPage() {
         onClose={() => setDispatchTarget(null)}
         onDispatched={() => {
           setDispatchTarget(null);
+          load();
+        }}
+      />
+
+      <DispatchRouteModal
+        open={routeOpen}
+        onClose={() => setRouteOpen(false)}
+        orders={routeOrders}
+        storeName={tenant?.name ?? "Loja"}
+        onMarkedOut={() => {
+          setRouteIds(new Set());
           load();
         }}
       />
