@@ -10,6 +10,7 @@ import { geocodeAddress, reverseGeocode } from "../orders/geocoding.js";
 import { audit } from "../../utils/audit.js";
 import { describeOpening, isStoreOpenNow, reopeningAfterOverride } from "../../utils/storeTime.js";
 import { cnpjDigits, isValidCnpj } from "../../utils/cnpj.js";
+import { isGoogleMapsUrl } from "../../utils/googleMaps.js";
 
 export const settingsRoutes = Router();
 settingsRoutes.use(requireAuth);
@@ -155,6 +156,15 @@ const settingsSchema = z.object({
   companyStateRegistration: z.string().trim().max(30).optional().nullable(),
   companyMunicipalRegistration: z.string().trim().max(30).optional().nullable(),
   companyPhone: z.string().trim().max(20).optional().nullable(),
+  // Só link de verdade do Google Maps (o bot manda este texto ao cliente): https + domínio do Google; vazio apaga.
+  googleMapsUrl: z
+    .string()
+    .trim()
+    .max(400)
+    .optional()
+    .nullable()
+    .refine((v) => !v || isGoogleMapsUrl(v), "Cole o link do Google Maps da loja (começa com https://maps.app.goo.gl/… ou https://www.google.com/maps/…)")
+    .transform((v) => (v === undefined ? undefined : v || null)),
   acceptsDelivery: z.boolean().optional(),
   acceptsPickup: z.boolean().optional(),
   acceptsDineIn: z.boolean().optional(),

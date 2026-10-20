@@ -95,6 +95,8 @@ model TenantSettings {
   companyStateRegistration String?
   companyMunicipalRegistration String?
   companyPhone        String?
+  // Link da loja no Google Maps (ficha do Google Meu Negócio): o bot manda este link quando o cliente pergunta onde fica.
+  googleMapsUrl       String?
   instagram           String?
   facebook            String?
   pixKey              String?

@@ -10,6 +10,7 @@ import { ZonesOverviewMap } from "../components/ZonesOverviewMap";
 import { StoreStatusControl } from "../components/StoreStatusControl";
 import { ImageUploadField } from "../components/ImageUploadField";
 import { CompanyDataFields } from "../components/CompanyDataFields";
+import { GoogleMapsLinkField } from "../components/GoogleMapsLinkField";
 import { isDesktopApp } from "../lib/print";
 import { disablePushNotifications, enablePushNotifications, getPushSubscriptionStatus, pushSupported } from "../lib/push";
 import { AuditLogTab } from "./settings/AuditLogTab";
@@ -41,6 +42,7 @@ interface SettingsData {
     companyStateRegistration?: string | null;
     companyMunicipalRegistration?: string | null;
     companyPhone?: string | null;
+    googleMapsUrl?: string | null;
     instagram?: string | null;
     pixKey?: string | null;
     pixReceiptExpectedName?: string | null;
@@ -473,6 +475,14 @@ export function SettingsPage() {
               placeholder="Preenchido automaticamente pelo CEP — complete com o número/lote"
             />
           </Field>
+          <GoogleMapsLinkField
+            value={s.googleMapsUrl ?? ""}
+            onSave={async (googleMapsUrl) => {
+              // Sem atualização otimista: o servidor confere o link e o erro tem que aparecer no campo.
+              const saved = await api.put<NonNullable<SettingsData["settings"]>>("/settings", { googleMapsUrl });
+              setData((prev) => (prev ? { ...prev, settings: { ...prev.settings, googleMapsUrl: saved.googleMapsUrl } } : prev));
+            }}
+          />
           <CompanyDataFields
             values={s}
             onSave={async (patch) => {

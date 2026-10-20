@@ -1001,10 +1001,19 @@ export const STORE_PIN_REPLY = "[[PINO_DA_LOJA]]";
  * Manda a localização da loja como cartão de localização do WhatsApp (o pino). O link do mapa em texto só vai se o
  * envio do cartão FALHAR de vez — assim o cliente nunca fica sem nada. Sem coordenadas cadastradas não envia nada.
  */
-export async function deliverStorePin(tenantId: string, phone: string, storeName: string): Promise<{ sent: boolean; address: string | null }> {
-  const s = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { storeLat: true, storeLng: true, address: true } });
-  if (s?.storeLat == null || s.storeLng == null) return { sent: false, address: s?.address ?? null };
+export async function deliverStorePin(tenantId: string, phone: string, storeName: string): Promise<{ sent: boolean; address: string | null; viaLink?: boolean }> {
+  const s = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { storeLat: true, storeLng: true, address: true, googleMapsUrl: true } });
   const instance = instanceNameFor(tenantId);
+  // Loja com ficha no Google Maps: manda o link dela (o cliente abre o local marcado, com nome, fotos e rota). O cartão de
+  // localização da Evolution sai sem miniatura e aparecia em branco, então o link é o caminho principal quando existe.
+  if (s?.googleMapsUrl) {
+    // O texto exato fica registrado: o eco "fromMe" dele é comparado com isso pra não virar "a equipe respondeu".
+    const placeText = `📍 *${storeName}*${s.address ? `\n${s.address}` : ""}\n🗺️ ${s.googleMapsUrl}`;
+    await waTransport.sendText(instance, phone, placeText);
+    await recordOutboundMessage(tenantId, phone, placeText, { senderType: "BOT" });
+    return { sent: true, address: s.address, viaLink: true };
+  }
+  if (s?.storeLat == null || s.storeLng == null) return { sent: false, address: s?.address ?? null };
   try {
     await waTransport.sendLocation(instance, phone, { name: storeName, address: s.address ?? "", lat: s.storeLat, lng: s.storeLng });
     // O eco "fromMe" do cartão é reconhecido por este texto (senão pausaria o bot como se fosse a equipe).
@@ -1801,8 +1810,9 @@ export async function handleAiConversation(
     description: "Envia ao cliente o PINO DO MAPA da loja (localização do WhatsApp). Use SEMPRE que o cliente perguntar onde a loja fica / o endereço / como chegar.",
     inputSchema: z.object({ confirmed: z.literal(true) }),
     run: async () => {
-      const { sent, address } = await deliverStorePin(tenantId, phone, tenant.name);
+      const { sent, address, viaLink } = await deliverStorePin(tenantId, phone, tenant.name);
       if (!sent) return `Não tenho o pino da loja cadastrado — responda só com o endereço escrito: ${address ?? "não cadastrado"}.`;
+      if (viaLink) return "Enviei ao cliente a mensagem com o nome, o endereço e o link do Google Maps da loja. NÃO repita o endereço nem o link: escreva UMA frase curta e pergunte se prefere retirada no balcão ou entrega.";
       return `Localização da loja enviada. Escreva UMA frase curta com o endereço (${address ?? "sem endereço escrito"}) e ofereça retirada no balcão ou entrega, sem repetir o pino.`;
     },
   });
