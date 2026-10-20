@@ -11,7 +11,7 @@ import { env } from "../../config/env.js";
 import { waitUntil } from "@vercel/functions";
 import { getWhatsAppSenderFor, instanceNameFor, waTransport, type WaRawImageMessage } from "./transport.js";
 import { handleIncoming } from "./bot.service.js";
-import { STORE_PIN_REPLY, sendStorePin } from "./ai-conversation.service.js";
+import { STORE_PIN_REPLY, deliverStorePin, sendStorePin } from "./ai-conversation.service.js";
 import { recordInboundMessage, recordOutboundMessage } from "./messages.service.js";
 import { serializeByKey } from "./request-queue.js";
 import { maybeRunFollowUpSweep } from "./followup.service.js";
@@ -124,6 +124,22 @@ whatsappRoutes.post(
     let detail = "";
     const ok = await moveLead(tenantId, phone, stage, { force: true, onDetail: (d) => (detail = d) });
     res.json({ ok, soft: ok && detail.startsWith("SOFT:"), detail: ok && !detail.startsWith("SOFT:") ? undefined : detail });
+  }),
+);
+
+/** Teste manual: manda pro número informado a mesma mensagem de "onde fica?" que o bot manda ao cliente. */
+whatsappRoutes.post(
+  "/test-store-location",
+  requireAuth,
+  requireRole("MANAGER"),
+  rateLimit(10, 60_000),
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const { phone } = z.object({ phone: z.string().min(10).max(20) }).parse(req.body);
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } });
+    const result = await deliverStorePin(tenantId, phone.replace(/\D/g, ""), tenant?.name ?? "Loja");
+    if (!result.sent) throw new AppError(409, "A loja não tem o link do Google Maps nem a localização (pino) cadastrados em Configurações.");
+    res.json({ ok: true, viaLink: !!result.viaLink });
   }),
 );
 

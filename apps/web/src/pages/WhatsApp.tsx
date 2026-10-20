@@ -172,6 +172,18 @@ export function WhatsAppPage() {
     }
   }
 
+  const [locPhone, setLocPhone] = useState("");
+  const [locResult, setLocResult] = useState("");
+  async function testStoreLocation() {
+    setLocResult("Enviando...");
+    try {
+      const r = await api.post<{ ok: boolean; viaLink: boolean }>("/whatsapp/test-store-location", { phone: locPhone.replace(/\D/g, "") });
+      setLocResult(r.viaLink ? "✓ Enviado com o link do Google Maps. Abra o WhatsApp desse número e confira se o link abre a loja certa." : "✓ Enviado o cartão de localização (você ainda não cadastrou o link do Google Maps em Configurações).");
+    } catch (err) {
+      setLocResult(err instanceof Error ? err.message : "Não consegui enviar o teste.");
+    }
+  }
+
   const connected = wa?.status === "CONNECTED";
 
   return (
@@ -361,6 +373,16 @@ export function WhatsAppPage() {
               </div>
               {testResult && <p className="text-xs">{testResult}</p>}
             </div>
+          </Card>
+
+          <Card className="space-y-3 p-5">
+            <h3 className="text-sm font-semibold">Testar “onde fica?”</h3>
+            <p className="text-xs text-surface-400">Manda pro número informado a mesma mensagem de localização que o bot envia ao cliente.</p>
+            <Input value={locPhone} onChange={(e) => setLocPhone(e.target.value)} placeholder="63 98400-0289" inputMode="tel" />
+            <Button variant="secondary" size="sm" disabled={locPhone.replace(/\D/g, "").length < 10 || !connected} onClick={testStoreLocation}>
+              Enviar teste de localização
+            </Button>
+            {locResult && <p className="text-xs">{locResult}</p>}
           </Card>
 
           <Card className="space-y-3 p-5">
