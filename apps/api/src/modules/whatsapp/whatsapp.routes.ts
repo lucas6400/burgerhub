@@ -308,6 +308,29 @@ function catalogMessageText(message: NonNullable<NonNullable<WebhookBody["data"]
   return "";
 }
 
+/**
+ * Conversas em que acabou de chegar uma mensagem "fromMe" que ainda não sabemos se é a equipe ou o eco do próprio sistema
+ * (a classificação leva ECHO_WAIT_MS). Por instância: o bot, antes de enviar, espera esse marcador sair.
+ */
+const humanPending = new Map<string, number>();
+const HUMAN_PENDING_MAX_WAIT_MS = 5_000;
+
+/**
+ * A equipe respondeu esta conversa depois da mensagem do cliente que o bot está respondendo? Aí a resposta do bot (que a
+ * IA levou segundos pra montar) já está velha e iria por cima do atendimento — já aconteceu de o bot perguntar "o que você
+ * gostaria de pedir?" logo depois do dono responder. Só olha mensagens HUMAN (a pausa do bot também é ligada pelo próprio
+ * bot, ao chamar a equipe, e essa resposta deve sair).
+ */
+export async function humanSpokeSince(tenantId: string, phone: string, since: Date): Promise<boolean> {
+  const key = `${tenantId}:${phone}`;
+  for (let waited = 0; humanPending.has(key) && waited < HUMAN_PENDING_MAX_WAIT_MS; waited += 500) await sleep(500);
+  const human = await prisma.whatsAppMessage.findFirst({
+    where: { tenantId, phone, senderType: "HUMAN", createdAt: { gte: since } },
+    select: { id: true },
+  });
+  return !!human;
+}
+
 /** Espera antes de responder no modo IA, pra juntar mensagens picadas do cliente. */
 const BOT_DEBOUNCE_MS = Number(process.env.WA_DEBOUNCE_MS ?? (env.whatsapp.mock ? 0 : 10_000));
 const ECHO_WAIT_MS = env.whatsapp.mock ? 0 : 3_000;
@@ -439,24 +462,29 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
       isMedia = !!humanText;
     }
     if (!humanText.trim()) return;
-    try {
-      // O servidor de WhatsApp também devolve como "fromMe" as mensagens que o
-      // PRÓPRIO sistema enviou (bot, avisos, botão Mensagem do painel) — essas já
-      // ficam registradas em recordOutboundMessage logo após o envio, então
-      // espera um instante e ignora o eco; só sobra o que foi digitado à mão.
-      await sleep(ECHO_WAIT_MS);
-      const echo = await prisma.whatsAppMessage.findFirst({
+    const pendingKey = `${tenantId}:${phone}`;
+    // O servidor de WhatsApp também devolve como "fromMe" as mensagens que o PRÓPRIO sistema enviou (bot, avisos,
+    // botão Mensagem do painel) — essas ficam registradas em recordOutboundMessage logo após o envio.
+    // A foto e o pino da loja que o PRÓPRIO bot manda também voltam como "fromMe" — não são a equipe.
+    const isSystemEcho = async (): Promise<boolean> =>
+      !!(await prisma.whatsAppMessage.findFirst({
         where: {
           tenantId,
           phone,
           direction: "OUT",
           createdAt: { gte: new Date(Date.now() - 2 * 60_000) },
-          // A foto e o pino da loja que o PRÓPRIO bot manda também voltam como "fromMe" — não são a equipe.
           OR: [{ body: humanText }, ...(isMedia ? [{ body: { startsWith: "🖼️ Foto enviada" } }, { body: { startsWith: "📍 Localização da loja" } }] : [])],
         },
         select: { id: true },
-      });
-      if (echo) return;
+      }));
+    try {
+      if (await isSystemEcho()) return; // eco de algo que o sistema já registrou: não é a equipe
+      // Pode ser a equipe falando: o bot, se estiver prestes a responder esta conversa, espera a classificação (humanSpokeSince).
+      humanPending.set(pendingKey, Date.now());
+      // O eco do sistema pode chegar antes do registro do envio: espera um instante e confere de novo;
+      // só sobra o que foi digitado à mão.
+      await sleep(ECHO_WAIT_MS);
+      if (await isSystemEcho()) return;
       // Ticket de pedido novo mandado pro próprio dono também não é conversa com cliente.
       const alertSettings = await prisma.tenantSettings.findUnique({ where: { tenantId }, select: { orderAlertPhone: true } });
       const alertDigits = alertSettings?.orderAlertPhone?.replace(/\D/g, "").slice(-10);
@@ -479,6 +507,8 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
       await recordOutboundMessage(tenantId, phone, humanText, { senderType: "HUMAN" });
     } catch (err) {
       console.error("Erro ao registrar mensagem humana do WhatsApp:", err);
+    } finally {
+      humanPending.delete(pendingKey);
     }
     return;
   }
@@ -585,6 +615,11 @@ async function processWebhookMessage(instance: string, body: WebhookBody) {
     try {
       const replies = await handleIncoming(tenantId, phone, textToProcess, body.data?.pushName, location, image);
       for (const reply of replies) {
+        // A equipe respondeu o cliente enquanto a IA ainda pensava: a resposta do bot ficou velha e iria por cima do atendimento.
+        if (await humanSpokeSince(tenantId, phone, inbound.createdAt)) {
+          console.warn("[whatsapp] resposta do bot descartada: a equipe já respondeu esta conversa.", { tenantId, phone });
+          break;
+        }
         if (reply === STORE_PIN_REPLY) {
           // Falha no pino não pode derrubar a resposta: o texto da confirmação já foi.
           await sendStorePin(tenantId, phone).catch((err) => console.error("Falha ao enviar o pino da loja na retirada:", err));
