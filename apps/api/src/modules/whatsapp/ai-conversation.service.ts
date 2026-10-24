@@ -886,10 +886,18 @@ export function stripMetaCommentary(text: string): string {
  */
 const CLAIMS_CART_CHANGE_RE = /\b(adicionei|adicionad[oa]|anotei|anotad[oa]|coloquei|inclu[ií]|troquei|mudei|removi|tirei|retirei|atualizei|boa escolha)\b|j[aá] (est[aá]|ficou) no (carrinho|pedido)/i;
 const PROGRESS_ON_EMPTY_CART_RE = /entrega ou retirada|forma de pagamento|como (vai|prefere|quer) pagar|posso confirmar|pix, (cart[aã]o|dinheiro)|resumo do (seu )?pedido/i;
-export function shouldRetryWithoutTool(actions: string[], draft: OrderDraft, draftText: string): boolean {
+/**
+ * Cliente pedindo um item de verdade ("queria pedir novamente um combo x-bacon…"): verbo de pedido + nome de produto.
+ * Sem ferramenta e com o carrinho vazio, a resposta saía do mesmo jeito ("Vou confirmar… Fica R$ 26,00") e o pedido
+ * nunca entrava — a cliente mandou localização e pagamento e só aí o bot disse que não tinha item nenhum.
+ */
+const ORDER_INTENT_RE = /\b(quer(o|ia|emos)|vou querer|gostaria|pedir|pedido|me (v[eê]|manda)|manda(r)?|pode ser|fecha|bota|adiciona|coloca)\b/i;
+const PRODUCT_WORD_RE = /\b(combo|x[- ]?(bacon|tudo|salada|burger|casa|egg)|hamb[uú]rguer|lanche|refri|coca|guaran[aá])\b|\b\d+ ?x\b/i;
+export function shouldRetryWithoutTool(actions: string[], draft: OrderDraft, draftText: string, customerText = ""): boolean {
   if (actions.length > 0 || draft.finalizedOrderId) return false;
   if (CLAIMS_CART_CHANGE_RE.test(draftText)) return true;
-  return draft.cart.length === 0 && PROGRESS_ON_EMPTY_CART_RE.test(draftText);
+  if (draft.cart.length > 0) return false;
+  return PROGRESS_ON_EMPTY_CART_RE.test(draftText) || (ORDER_INTENT_RE.test(customerText) && PRODUCT_WORD_RE.test(customerText));
 }
 const MISSING_TOOL_NUDGE =
   "[AVISO DO SISTEMA — não é uma mensagem do cliente] Na sua resposta anterior você NÃO chamou nenhuma ferramenta, então NADA foi registrado no pedido (veja o estado: carrinho, tipo e pagamento continuam como estavam). Releia a última mensagem do cliente e chame agora as ferramentas necessárias (update_cart_item para itens, set_fulfillment_type, set_payment_method etc.). Se o cliente só fez uma pergunta e não pediu nada, responda sem registrar nada. Depois escreva a resposta ao cliente conforme o resultado REAL das ferramentas.";
@@ -1086,6 +1094,8 @@ async function runFinalize(
   tenant: { name: string; slug: string; settings: { pixKey: string | null; defaultPrepMinutes: number; mpEnabled: boolean; mpAccessToken: string | null; botAutoPixEnabled: boolean } },
   draft: OrderDraft,
   newSeparateOrder = false,
+  /** Preenchido quando o pedido é feito com a loja FECHADA (fora do horário, dia normal): vira pedido agendado, dito claramente. */
+  closedNow?: { when: string | null },
 ): Promise<string> {
   if (draft.finalizedOrderId) {
     return `Esse pedido já foi confirmado (pedido #${draft.finalizedOrderId}). Se quiser fazer um novo pedido, comece um carrinho novo.`;
@@ -1129,7 +1139,13 @@ async function runFinalize(
     type: draft.type,
     paymentMethod: useOnlinePix ? "ONLINE" : draft.paymentMethod,
     changeForCents: draft.changeForCents,
-    notes: draft.paymentSplitNote ? `💳 PAGAMENTO DIVIDIDO (confirmar com o cliente): ${draft.paymentSplitNote}` : undefined,
+    notes:
+      [
+        closedNow ? `⏰ PEDIDO AGENDADO: feito com a loja fechada — preparar só quando abrir${closedNow.when ? ` (${closedNow.when})` : ""}.` : "",
+        draft.paymentSplitNote ? `💳 PAGAMENTO DIVIDIDO (confirmar com o cliente): ${draft.paymentSplitNote}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n") || undefined,
     customer: { name: pushName || `Cliente ${phone.slice(-4)}`, phone },
     address: draft.address ? { ...draft.address, reference: draft.deliveryRef } : undefined,
     // Item com marca de refri especial e/ou adicionais vira uma linha por "pacote" (a Coca e os adicionais somam
@@ -1186,7 +1202,9 @@ async function runFinalize(
     : "";
 
   const prepRange = `${tenant.settings.defaultPrepMinutes} a ${tenant.settings.defaultPrepMinutes + 20} min`;
-  const timeNote = isPickup
+  const timeNote = closedNow
+    ? `A LOJA ESTÁ FECHADA agora: este pedido ficou AGENDADO e só começa a ser preparado quando abrirmos${closedNow.when ? ` (${closedNow.when})` : ""}. Diga isso claramente na confirmação e NÃO dê previsão em minutos (nada de "${prepRange}"). Pagamento na ${isPickup ? "retirada" : "entrega"}, como combinado.`
+    : isPickup
     ? `Retirada no balcão: o pedido fica pronto em ${prepRange}. Mensagem CURTA e direta (no máximo 4 linhas): número do pedido, itens e total, "retirada no balcão — fica pronto em ${prepRange}" e como paga. NÃO fale de entrega, entregador, taxa nem de "confirmação do pagamento". O pino da loja vai logo depois, sozinho.`
     : `Tempo estimado: ${prepRange}.`;
   return (
@@ -1265,6 +1283,11 @@ export async function handleAiConversation(
   // Loja fechada DE PROPÓSITO (botão "Fechada" ou dia fechado): ninguém monta pedido — nem pra agendar. Quem não tem
   // pedido em andamento recebe o aviso pronto, com o dia da semana e a data em que voltamos; quem tem segue normal.
   const storeBlocked = ordersBlocked(tenant.settings, tenant.businessHours);
+  // Pedido fechado com a loja fora do horário (dia normal): vira pedido AGENDADO — dito ao cliente e marcado no pedido.
+  const closedNowInfo = (): { when: string | null } | undefined =>
+    isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, isOpenOverrideAt: tenant.settings.isOpenOverrideAt, businessHours: tenant.businessHours })
+      ? undefined
+      : { when: reopeningText(tenant.settings, tenant.businessHours) };
   if (storeBlocked && !(await getActiveOrdersText(tenantId, phone))) {
     const reply = blockedStoreReply(tenant.settings, tenant.businessHours);
     data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];
@@ -1746,7 +1769,7 @@ export async function handleAiConversation(
       if (!(ASKED_CONFIRM_RE.test(prevAssistantText) && (await customerAccepted()))) {
         throw new Error("O cliente ainda NÃO confirmou o resumo completo (itens, total, entrega/retirada e forma de pagamento). Não finalize agora: escreva o resumo e pergunte 'Posso confirmar?'; só chame finalize_order depois do 'sim' dele.");
       }
-      return runFinalize(tenantId, phone, pushName, tenant, draft, newSeparateOrder === true);
+      return runFinalize(tenantId, phone, pushName, tenant, draft, newSeparateOrder === true, closedNowInfo());
     },
   });
 
@@ -2000,7 +2023,7 @@ export async function handleAiConversation(
   // passada com aviso resolve; o rascunho sem ferramenta e o aviso saem do histórico salvo.
   let turnMessages = runner.params.messages as Msg[];
   const draftText = finalMessage.content.filter((b): b is Anthropic.Beta.Messages.BetaTextBlock => b.type === "text").map((b) => b.text).join(" ");
-  if (turnMessages[turnMessages.length - 1]?.role === "assistant" && shouldRetryWithoutTool(extractTurnActions(turnMessages), draft, draftText)) {
+  if (turnMessages[turnMessages.length - 1]?.role === "assistant" && shouldRetryWithoutTool(extractTurnActions(turnMessages), draft, draftText, ownText)) {
     console.error("[ai-conversation] resposta sem chamar ferramenta; refazendo com aviso (modelo mais forte).", { tenantId, phone });
     try {
       const base = turnMessages;
@@ -2169,21 +2192,27 @@ ${intro.tail}`;
     const isDelivery = draft.type === "DELIVERY";
     const payment = draft.paymentMethod;
     try {
-      await runFinalize(tenantId, phone, pushName, tenant, draft, false);
+      const closed = closedNowInfo();
+      await runFinalize(tenantId, phone, pushName, tenant, draft, false, closed);
       const order = draft.finalizedOrderId ? await prisma.order.findUnique({ where: { id: draft.finalizedOrderId }, select: { number: true, totalCents: true } }) : null;
       const prep = tenant.settings.defaultPrepMinutes;
+      const whenLine = closed
+        ? `A loja está fechada agora: seu pedido fica *agendado* e começa a ser preparado quando abrirmos${closed.when ? ` (${closed.when})` : ""}.`
+        : isDelivery
+          ? `Entrega • ${prep} a ${prep + 20} min`
+          : `Retirada no balcão — fica pronto em ${prep} a ${prep + 20} min.`;
       const payLine = isDelivery
         ? payment === "PIX" ? "O Pix é pago na entrega." : payment === "CASH" ? "O pagamento é em dinheiro na entrega." : "O pagamento no cartão é feito na entrega, na maquininha."
         : payment === "PIX" ? "Você paga o Pix aqui no balcão." : payment === "CASH" ? "Você paga em dinheiro aqui no balcão." : "Você paga no cartão aqui no balcão, na maquininha.";
       const msg = isDelivery
         ? `Pedido confirmado! 🎉 *Pedido #${order?.number ?? ""}*
 ${itemsText} — ${brl(order?.totalCents ?? total)}
-Entrega • ${prep} a ${prep + 20} min
+${whenLine}
 ${payLine}
 A gente te avisa quando sair. Obrigada e bom apetite! 🍔`
         : `Pedido confirmado! 🎉 *Pedido #${order?.number ?? ""}*
 ${itemsText} — ${brl(order?.totalCents ?? total)}
-Retirada no balcão — fica pronto em ${prep} a ${prep + 20} min.
+${whenLine}
 ${payLine}
 Te esperamos! 🍔`;
       data.history = replaceLastAssistantText(data.history, msg);

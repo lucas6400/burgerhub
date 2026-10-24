@@ -93,9 +93,18 @@ export function reopeningAfterOverride(input: OpenInput): NextOpening | null {
   return nextOpeningAfter(input.isOpenOverrideAt ?? new Date(), input.businessHours);
 }
 
+/** Fechamento igual ou antes da abertura ("18:30–00:00", "18:30–02:00") = fecha depois da meia-noite. */
+const crossesMidnight = (h: BusinessHourLike): boolean => h.closeTime <= h.openTime;
+
 function withinHoursNow(hours: BusinessHourLike[]): boolean {
   const { weekday, hhmm } = nowInStoreTimezone();
-  return hours.some((h) => h.weekday === weekday && !h.closed && h.openTime <= hhmm && hhmm <= h.closeTime);
+  const yesterday = (weekday + 6) % 7;
+  return hours.some((h) => {
+    if (h.closed) return false;
+    if (h.weekday === weekday) return crossesMidnight(h) ? hhmm >= h.openTime : h.openTime <= hhmm && hhmm <= h.closeTime;
+    // Madrugada: o expediente de ontem que passou da meia-noite (ex.: 18:30–02:00) ainda está valendo.
+    return h.weekday === yesterday && crossesMidnight(h) && hhmm <= h.closeTime;
+  });
 }
 
 /** Se a loja está aberta agora — override manual do lojista tem prioridade sobre o horário cadastrado. */
@@ -124,10 +133,11 @@ export function minutesUntilCloseToday(
 ): number | null {
   const { weekday, hhmm } = nowInStoreTimezone();
   const today = businessHours.find((h) => h.weekday === weekday && !h.closed);
-  if (!today || hhmm > today.closeTime) return null;
+  if (!today || (!crossesMidnight(today) && hhmm > today.closeTime)) return null;
   const [nowH, nowM] = hhmm.split(":").map(Number);
   const [closeH, closeM] = today.closeTime.split(":").map(Number);
-  return closeH * 60 + closeM - (nowH * 60 + nowM);
+  // Fecha depois da meia-noite: conta até o fim do dia mais o que passa dele.
+  return closeH * 60 + closeM + (crossesMidnight(today) ? 24 * 60 : 0) - (nowH * 60 + nowM);
 }
 
 /** Hora do dia (0-23) no horário da loja — pra agrupar pedidos por horário de pico. */
