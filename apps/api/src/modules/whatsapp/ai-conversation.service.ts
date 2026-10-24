@@ -13,7 +13,7 @@ import { allowAiConversationTurn } from "./ai-conversation-throttle.js";
 import { moveLead } from "./labels.service.js";
 import { recordOutboundMessage } from "./messages.service.js";
 import { getWhatsAppSenderFor, instanceNameFor, waTransport, type WaRawImageMessage } from "./transport.js";
-import { describeOpening, isStoreBlockingOrders, isStoreOpenNow, nextOpeningAfter, nowInStoreTimezone, reopeningAfterOverride } from "../../utils/storeTime.js";
+import { describeInstant, describeOpening, isStoreBlockingOrders, isStoreOpenNow, nextOpeningAfter, nowInStoreTimezone, reopeningAfterOverride } from "../../utils/storeTime.js";
 import { getAnthropicClient, AI_MODEL_HAIKU, AI_MODEL_SONNET, AI_MODEL_EXECUTOR } from "../ai/anthropic-client.js";
 import { logAiUsage, type AiUsagePurpose } from "../ai/usage-log.js";
 import type { TokenUsage } from "../ai/pricing.js";
@@ -778,16 +778,21 @@ async function getActiveOrdersText(tenantId: string, phone: string): Promise<str
       tenantId,
       customer: { phone: { endsWith: phoneTail(phone) } },
       status: { in: Object.keys(ACTIVE_ORDER_STATUS_LABELS) },
-      createdAt: { gte: new Date(Date.now() - 8 * 3_600_000) },
+      // Pedido agendado (feito horas antes, pra quando a loja abrir) continua sendo "pedido em andamento" do cliente.
+      OR: [{ createdAt: { gte: new Date(Date.now() - 8 * 3_600_000) } }, { scheduledFor: { gt: new Date() } }],
     },
     orderBy: { createdAt: "asc" },
-    select: { number: true, status: true, type: true, createdAt: true },
+    select: { number: true, status: true, type: true, createdAt: true, scheduledFor: true },
   });
   if (orders.length === 0) return "";
   return orders
     .map((o) => {
+      const kind = o.type === "DELIVERY" ? "entrega" : "retirada";
+      if (o.scheduledFor && o.scheduledFor > new Date()) {
+        return `Pedido #${o.number} (${kind}): AGENDADO — ainda NÃO foi pra cozinha; começa a ser preparado quando a loja abrir (${describeInstant(o.scheduledFor)})`;
+      }
       const min = Math.max(0, Math.round((Date.now() - o.createdAt.getTime()) / 60_000));
-      return `Pedido #${o.number} (${o.type === "DELIVERY" ? "entrega" : "retirada"}): ${ACTIVE_ORDER_STATUS_LABELS[o.status]} — feito há ${min} min`;
+      return `Pedido #${o.number} (${kind}): ${ACTIVE_ORDER_STATUS_LABELS[o.status]} — feito há ${min} min`;
     })
     .join("\n");
 }
@@ -911,6 +916,9 @@ function syncFinalAssistantText(history: Anthropic.Beta.Messages.BetaMessagePara
 }
 
 /** "hoje às 18:30" / "amanhã às 18:30" / "domingo às 18:30" — próxima abertura pelo horário cadastrado. */
+/** Pedido feito com a loja fechada (dia normal, fora do horário): quando abrimos (texto) e o instante da abertura. */
+type ClosedNow = { when: string | null; at: Date | null };
+
 type StoreHours = { weekday: number; openTime: string; closeTime: string; closed?: boolean }[];
 type OpenSettings = { isOpenOverride: boolean | null; isOpenOverrideAt?: Date | null };
 
@@ -1095,7 +1103,7 @@ async function runFinalize(
   draft: OrderDraft,
   newSeparateOrder = false,
   /** Preenchido quando o pedido é feito com a loja FECHADA (fora do horário, dia normal): vira pedido agendado, dito claramente. */
-  closedNow?: { when: string | null },
+  closedNow?: ClosedNow,
 ): Promise<string> {
   if (draft.finalizedOrderId) {
     return `Esse pedido já foi confirmado (pedido #${draft.finalizedOrderId}). Se quiser fazer um novo pedido, comece um carrinho novo.`;
@@ -1146,6 +1154,8 @@ async function runFinalize(
       ]
         .filter(Boolean)
         .join("\n") || undefined,
+    // Fora do horário: o pedido nasce AGENDADO (fica na aba Agendamentos até a hora de abrir ou até alguém liberar).
+    scheduledFor: closedNow?.at ?? undefined,
     customer: { name: pushName || `Cliente ${phone.slice(-4)}`, phone },
     address: draft.address ? { ...draft.address, reference: draft.deliveryRef } : undefined,
     // Item com marca de refri especial e/ou adicionais vira uma linha por "pacote" (a Coca e os adicionais somam
@@ -1284,10 +1294,10 @@ export async function handleAiConversation(
   // pedido em andamento recebe o aviso pronto, com o dia da semana e a data em que voltamos; quem tem segue normal.
   const storeBlocked = ordersBlocked(tenant.settings, tenant.businessHours);
   // Pedido fechado com a loja fora do horário (dia normal): vira pedido AGENDADO — dito ao cliente e marcado no pedido.
-  const closedNowInfo = (): { when: string | null } | undefined =>
+  const closedNowInfo = (): ClosedNow | undefined =>
     isStoreOpenNow({ isOpenOverride: tenant.settings.isOpenOverride, isOpenOverrideAt: tenant.settings.isOpenOverrideAt, businessHours: tenant.businessHours })
       ? undefined
-      : { when: reopeningText(tenant.settings, tenant.businessHours) };
+      : { when: reopeningText(tenant.settings, tenant.businessHours), at: nextOpeningAfter(new Date(), tenant.businessHours)?.at ?? null };
   if (storeBlocked && !(await getActiveOrdersText(tenantId, phone))) {
     const reply = blockedStoreReply(tenant.settings, tenant.businessHours);
     data.history = [...data.history, { role: "user", content: text }, { role: "assistant", content: reply }];

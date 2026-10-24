@@ -76,6 +76,21 @@ export function describeOpening(op: NextOpening): string {
   return `${rel}${DAY_NAMES[op.weekday]} (${op.dateLabel}), às ${op.openTime}`;
 }
 
+/** Um instante qualquer no mesmo formato: "amanhã, terça-feira (13/10), às 18:30" (horário da loja). */
+export function describeInstant(at: Date): string {
+  const local = new Date(at.getTime() - STORE_UTC_OFFSET_HOURS * MS_HOUR);
+  const nowLocal = new Date(Date.now() - STORE_UTC_OFFSET_HOURS * MS_HOUR);
+  const dayStart = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return describeOpening({
+    at,
+    weekday: local.getUTCDay(),
+    daysAhead: Math.round((dayStart(local) - dayStart(nowLocal)) / (24 * MS_HOUR)),
+    openTime: `${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`,
+    dateLabel: `${pad(local.getUTCDate())}/${pad(local.getUTCMonth() + 1)}`,
+  });
+}
+
 /**
  * O "Fechada" forçado do painel vale só até a próxima abertura do horário cadastrado — senão a loja ficava fechada
  * pra sempre se o dono esquecesse de voltar pro "Horário normal". Sem a data do clique (linha antiga), não expira.

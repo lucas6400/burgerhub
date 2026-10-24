@@ -17,6 +17,8 @@ import {
   MessageCircle,
   Moon,
   Package,
+  Printer,
+  CalendarClock,
   Settings,
   ShoppingBag,
   Store,
@@ -42,6 +44,7 @@ const NAV_ITEMS = [
   { to: "/pdv", label: "PDV — Balcão", icon: Store },
   { to: "/mesas", label: "Mesas", icon: Table2 },
   { to: "/pedidos", label: "Pedidos", icon: ShoppingBag },
+  { to: "/agendamentos", label: "Agendamentos", icon: CalendarClock, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/entregas", label: "Entregas", icon: Truck, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/entregas-metricas", label: "Métricas de Entrega", icon: Activity, hideForRoles: ["KITCHEN", "COURIER"] },
   { to: "/entregadores", label: "Entregadores", icon: Bike, hideForRoles: ["KITCHEN", "COURIER"] },
@@ -78,7 +81,7 @@ export function AppShell() {
   const { user, tenant, loading, logout } = useAuth();
   const { dark, toggle } = useDarkMode();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const newOrderCount = useNewOrderAlert(tenant);
+  const { newCount: newOrderCount, printError, retryPrint } = useNewOrderAlert(tenant);
   const unreadConversations = useUnreadConversations();
   const navigate = useNavigate();
   const location = useLocation();
@@ -256,6 +259,15 @@ export function AppShell() {
             <WifiOff size={16} className="shrink-0" />
             <span>WhatsApp desconectado — o bot NÃO está recebendo mensagens. Toque aqui pra reconectar.</span>
           </NavLink>
+        )}
+        {printError && (
+          <div role="alert" className="flex shrink-0 flex-wrap items-center justify-center gap-3 bg-amber-500 px-4 py-2.5 text-center text-sm font-semibold text-white">
+            <Printer size={16} className="shrink-0" />
+            <span>{printError}</span>
+            <button onClick={retryPrint} className="rounded-lg bg-white/20 px-3 py-1 text-xs font-bold underline">
+              Tentar de novo
+            </button>
+          </div>
         )}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
           <Outlet />

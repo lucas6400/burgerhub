@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Gift, Keyboard, Minus, Plus, Printer, ShoppingCart, Trash2, Zap } from "lucide-react";
 import { api } from "../lib/api";
 import { brl, formatPhoneBR } from "../lib/format";
-import { printOrder } from "../lib/print";
+import { printOrderByHand } from "../lib/print";
 import { Badge, Button, Card, Field, Input, PageHeader, Skeleton, Textarea } from "../components/ui";
 import { useAuth } from "../stores/auth";
 import type { Customer, Order, Product } from "../types";
@@ -274,7 +274,7 @@ export function PosPage() {
               <span className="font-medium text-emerald-700 dark:text-emerald-400">
                 ✅ Pedido #{lastOrder.number} lançado!
               </span>
-              <Button size="sm" variant="secondary" onClick={() => tenant && printOrder(lastOrder, tenant)}>
+              <Button size="sm" variant="secondary" onClick={() => tenant && printOrderByHand(lastOrder, tenant)}>
                 <Printer size={14} /> Cupom
               </Button>
             </div>

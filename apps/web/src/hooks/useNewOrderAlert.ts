@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import { printOrder, type PrintTenant } from "../lib/print";
+import { isAutoPrintDevice, printOrder, type PrintTenant } from "../lib/print";
+
+/** Pedidos mais velhos que isso não são impressos sozinhos (ex.: ligar a impressão automática não pode cuspir o dia inteiro). */
+const AUTO_PRINT_MAX_AGE_MS = 6 * 3_600_000;
+const AUTO_PRINT_MAX_ATTEMPTS = 3;
 import type { Order } from "../types";
 
 const POLL_INTERVAL_MS = 15_000;
@@ -60,6 +64,9 @@ interface TenantForPrint extends PrintTenant {
 
 export function useNewOrderAlert(tenant?: TenantForPrint | null) {
   const [newCount, setNewCount] = useState(0);
+  const [printError, setPrintError] = useState("");
+  const printing = useRef(false);
+  const printAttempts = useRef<Map<string, number>>(new Map());
   const seenIds = useRef<Set<string> | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const tenantRef = useRef(tenant);
@@ -83,11 +90,45 @@ export function useNewOrderAlert(tenant?: TenantForPrint | null) {
 
     let cancelled = false;
 
+    /**
+     * Impressão automática pelo que o SERVIDOR sabe (printedAt), não pelo que esta tela viu chegar: pedido que entrou com o
+     * painel fechado, ou durante um recarregamento, também sai. O primeiro aparelho a "reservar" o pedido imprime; se a
+     * impressão falhar, devolve a reserva e tenta de novo na próxima verificação (até 3 vezes), avisando na tela.
+     */
+    async function printPending(orders: Order[]) {
+      const currentTenant = tenantRef.current;
+      if (printing.current || !currentTenant?.settings?.autoPrint || !isAutoPrintDevice()) return;
+      const oldest = Date.now() - AUTO_PRINT_MAX_AGE_MS;
+      const todo = orders
+        .filter((o) => !o.printedAt && o.source !== "POS" && o.type !== "DINE_IN" && new Date(o.createdAt).getTime() > oldest)
+        .filter((o) => (printAttempts.current.get(o.id) ?? 0) < AUTO_PRINT_MAX_ATTEMPTS)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      if (todo.length === 0) return;
+      printing.current = true;
+      try {
+        for (const order of todo) {
+          const claim = await api.post<{ claimed: boolean }>(`/orders/${order.id}/print-claim`, {}).catch(() => null);
+          if (!claim?.claimed) continue; // outro aparelho já imprimiu (ou falhou a rede: tenta na próxima)
+          const ok = await printOrder(order, currentTenant).catch(() => false);
+          if (ok) {
+            setPrintError("");
+          } else {
+            printAttempts.current.set(order.id, (printAttempts.current.get(order.id) ?? 0) + 1);
+            await api.post(`/orders/${order.id}/print-release`, {}).catch(() => {});
+            setPrintError(`Não consegui imprimir o pedido #${order.number}. Confira a impressora (ligada, com papel e escolhida em Configurações).`);
+          }
+        }
+      } finally {
+        printing.current = false;
+      }
+    }
+
     async function poll() {
       try {
         const orders = await api.get<Order[]>("/orders?active=true");
         if (cancelled) return;
         const pendingNew = orders.filter((o) => o.status === "NEW");
+        void printPending(orders);
 
         if (seenIds.current === null) {
           // Primeira carga: só registra o que já existia, sem alertar —
@@ -100,10 +141,6 @@ export function useNewOrderAlert(tenant?: TenantForPrint | null) {
         const arrived = pendingNew.filter((o) => !seenIds.current!.has(o.id));
         if (arrived.length > 0) {
           notifyNewOrder(arrived.length);
-          const currentTenant = tenantRef.current;
-          if (currentTenant?.settings?.autoPrint) {
-            for (const order of arrived) printOrder(order, currentTenant);
-          }
         }
         // Repete o som a cada verificação enquanto houver pedido parado em NEW —
         // não só na chegada, pra não passar despercebido se ninguém ouviu de primeira.
@@ -125,5 +162,10 @@ export function useNewOrderAlert(tenant?: TenantForPrint | null) {
     };
   }, []);
 
-  return newCount;
+  function retryPrint() {
+    printAttempts.current.clear();
+    setPrintError("");
+  }
+
+  return { newCount, printError, retryPrint };
 }

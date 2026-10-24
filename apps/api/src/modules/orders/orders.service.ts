@@ -67,6 +67,8 @@ export interface CreateOrderInput {
   customerId?: string;
   tableId?: string;
   address?: DeliveryAddressInput;
+  /** Pedido feito com a loja fechada: só entra nas listas "de agora" a partir deste instante (ou quando alguém liberar). */
+  scheduledFor?: Date;
 }
 
 export interface DeliveryQuote {
@@ -387,6 +389,7 @@ export async function createOrder(input: CreateOrderInput) {
         couponId,
         couponCode,
         notes: input.notes,
+        scheduledFor: input.scheduledFor,
         addressLabel: input.address?.label,
         addressStreet: input.address?.street,
         addressNumber: input.address?.number,

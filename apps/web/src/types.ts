@@ -58,6 +58,10 @@ export interface Order {
   type: string;
   source: string;
   priority: boolean;
+  /** Quando o cupom foi impresso (null = ainda não saiu). */
+  printedAt?: string | null;
+  /** Pedido agendado: fica na aba Agendamentos até este instante (depois dele, ou liberado antes, vira pedido normal). */
+  scheduledFor?: string | null;
   subtotalCents: number;
   discountCents: number;
   deliveryFeeCents: number;

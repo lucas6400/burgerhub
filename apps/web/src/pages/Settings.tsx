@@ -11,6 +11,7 @@ import { StoreStatusControl } from "../components/StoreStatusControl";
 import { ImageUploadField } from "../components/ImageUploadField";
 import { CompanyDataFields } from "../components/CompanyDataFields";
 import { GoogleMapsLinkField } from "../components/GoogleMapsLinkField";
+import { PrintDeviceSettings } from "../components/PrintDeviceSettings";
 import { isDesktopApp } from "../lib/print";
 import { disablePushNotifications, enablePushNotifications, getPushSubscriptionStatus, pushSupported } from "../lib/push";
 import { AuditLogTab } from "./settings/AuditLogTab";
@@ -610,13 +611,11 @@ export function SettingsPage() {
               label="Imprimir pedidos automaticamente"
             />
             <p className="pl-0.5 text-xs text-surface-400">
-              Ao chegar um pedido novo (cardápio, WhatsApp, PDV ou mesa), abre a impressão sozinho no computador com
-              esta tela aberta — pode ser o PDV, o KDS ou qualquer outra.{" "}
-              {isDesktopApp()
-                ? "Sai direto na impressora escolhida abaixo, sem nenhuma caixa de diálogo."
-                : "Sem configurar o navegador em modo kiosk de impressão, ainda aparece a caixa de confirmação de impressão; use o app desktop do BurgerHub pra imprimir 100% sozinho, sem essa etapa."}
+              Chave geral da loja. Cada pedido novo (cardápio ou WhatsApp) é impresso uma vez só, pelo computador marcado abaixo
+              como "imprime sozinho" — mesmo se o pedido chegar com esta tela fechada: ele sai assim que o app abrir.
             </p>
             {isDesktopApp() && <DesktopPrinterField />}
+            <PrintDeviceSettings tenant={tenant} />
             <Field label="Avisar pedido novo por WhatsApp (sem impressora)">
               <Input
                 defaultValue={s.orderAlertPhone ?? ""}

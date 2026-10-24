@@ -577,6 +577,10 @@ model Order {
   lateAlertSentAt DateTime? // quando o dono foi avisado que este pedido passou do tempo prometido
   status          String    @default("NEW") // AWAITING_PAYMENT | NEW | PREPARING | FINISHING | READY | OUT_FOR_DELIVERY | DELIVERED | SETTLED | CANCELED
   priority        Boolean   @default(false)
+  // Impressão automática: quando o cupom foi impresso (o primeiro aparelho a imprimir "reserva" o pedido; ver /orders/:id/print-claim).
+  printedAt       DateTime?
+  // Pedido AGENDADO (feito com a loja fechada): fica fora das listas "de agora" até este instante, ou até alguém liberar.
+  scheduledFor    DateTime?
   subtotalCents   Int
   discountCents   Int       @default(0)
   deliveryFeeCents Int      @default(0)

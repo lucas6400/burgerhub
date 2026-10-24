@@ -9,6 +9,7 @@ import { ForgotPasswordPage } from "./pages/ForgotPassword";
 import { ResetPasswordPage } from "./pages/ResetPassword";
 import { DashboardPage } from "./pages/Dashboard";
 import { OrdersPage } from "./pages/Orders";
+import { ScheduledPage } from "./pages/Scheduled";
 import { DispatchBoardPage } from "./pages/delivery/DispatchBoard";
 import { DeliveryAnalyticsPage } from "./pages/delivery/DeliveryAnalytics";
 import { DriversPage } from "./pages/delivery/Drivers";
@@ -52,6 +53,7 @@ export function App() {
       <Route element={<AppShell />}>
         <Route path="/dashboard" element={<RequireManager><DashboardPage /></RequireManager>} />
         <Route path="/pedidos" element={<OrdersPage />} />
+        <Route path="/agendamentos" element={<ScheduledPage />} />
         <Route path="/entregas" element={<DispatchBoardPage />} />
         <Route path="/entregas-metricas" element={<DeliveryAnalyticsPage />} />
         <Route path="/entregadores" element={<DriversPage />} />

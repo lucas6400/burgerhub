@@ -56,6 +56,8 @@ export async function runLateOrderSweep(tenantId: string): Promise<number> {
       source: { in: ["MENU", "WHATSAPP"] },
       lateAlertSentAt: null,
       createdAt: { lt: new Date(now - limitMin * 60_000), gte: new Date(now - MAX_AGE_MS) },
+      // Pedido agendado: o relógio do atraso começa na abertura (ou na liberação), não na hora em que o cliente pediu.
+      OR: [{ scheduledFor: null }, { scheduledFor: { lt: new Date(now - limitMin * 60_000) } }],
     },
     orderBy: { createdAt: "asc" },
     take: 10,

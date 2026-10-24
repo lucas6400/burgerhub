@@ -1,6 +1,6 @@
 {
   "name": "@burgerhub/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "App desktop do BurgerHub — carrega o painel normal e adiciona impressão nativa sem caixa de diálogo, bandeja do sistema e início automático com o Windows",
   "main": "main.js",

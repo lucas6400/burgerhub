@@ -28,14 +28,24 @@ const orderInclude = {
 ordersRoutes.get(
   "/",
   h(async (req, res) => {
-    const { status, active, search, from, to } = req.query as Record<string, string | undefined>;
+    const { status, active, search, from, to, scheduled } = req.query as Record<string, string | undefined>;
     const tenantId = tenantOf(req);
+    // Pedido agendado (feito com a loja fechada) só aparece nas listas "de agora" quando chega a hora; a aba
+    // Agendamentos pede scheduled=only. scheduled=include traz tudo (relatórios).
+    const now = new Date();
+    const scheduleFilter =
+      scheduled === "only"
+        ? { scheduledFor: { gt: now } }
+        : scheduled === "include"
+          ? {}
+          : { OR: [{ scheduledFor: null }, { scheduledFor: { lte: now } }] };
     // Painel aberto = ótima hora pra checar pedido atrasado (ver late-orders.service.ts).
     if (active === "true") void maybeRunLateOrderSweep(tenantId);
 
     const orders = await prisma.order.findMany({
       where: {
         tenantId,
+        AND: [scheduleFilter],
         ...(status ? { status } : {}),
         ...(active === "true"
           ? { status: { notIn: ["DELIVERED", "SETTLED", "CANCELED"] } }
@@ -164,6 +174,55 @@ ordersRoutes.patch(
       detail: { paymentMethod, orderNumber: order.number },
     });
     res.json(order);
+  }),
+);
+
+/**
+ * Impressão automática: o primeiro aparelho a "reservar" o pedido é quem imprime (dois aparelhos abertos não imprimem
+ * duas vezes, e um pedido que chegou com o painel fechado é impresso quando o painel abre). Se a impressão falhar,
+ * o aparelho devolve a reserva (print-release) e o pedido volta pra fila de impressão.
+ */
+ordersRoutes.post(
+  "/:id/print-claim",
+  h(async (req, res) => {
+    const claimed = await prisma.order.updateMany({
+      where: { id: req.params.id, tenantId: tenantOf(req), printedAt: null },
+      data: { printedAt: new Date() },
+    });
+    res.json({ claimed: claimed.count === 1 });
+  }),
+);
+
+ordersRoutes.post(
+  "/:id/print-release",
+  h(async (req, res) => {
+    await prisma.order.updateMany({ where: { id: req.params.id, tenantId: tenantOf(req) }, data: { printedAt: null } });
+    res.json({ ok: true });
+  }),
+);
+
+/** Cupom impresso à mão (botão Imprimir): marca como impresso pra a impressão automática não repetir. */
+ordersRoutes.post(
+  "/:id/printed",
+  h(async (req, res) => {
+    await prisma.order.updateMany({ where: { id: req.params.id, tenantId: tenantOf(req), printedAt: null }, data: { printedAt: new Date() } });
+    res.json({ ok: true });
+  }),
+);
+
+/** Libera um pedido agendado pra cozinha agora (sem esperar a abertura). */
+ordersRoutes.post(
+  "/:id/release-scheduled",
+  h(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const released = await prisma.order.updateMany({
+      where: { id: req.params.id, tenantId, scheduledFor: { gt: new Date() }, status: "NEW" },
+      // Fica com a hora da liberação (e não vazio): é dela que se conta o atraso do pedido, não de quando o cliente pediu.
+      data: { scheduledFor: new Date() },
+    });
+    if (released.count !== 1) throw new AppError(409, "Esse pedido não está mais agendado");
+    await audit({ tenantId, userId: req.auth!.userId, action: "RELEASE_SCHEDULED_ORDER", entity: "Order", entityId: req.params.id, detail: {} });
+    res.json({ ok: true });
   }),
 );
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Bike, DollarSign, MessageCircle, Printer, Search, ShoppingBag } from "lucide-react";
 import { api } from "../lib/api";
 import { DispatchRouteModal } from "../components/DispatchRouteModal";
-import { printOrder } from "../lib/print";
+import { printOrderByHand } from "../lib/print";
 import { useAuth } from "../stores/auth";
 import {
   brl,
@@ -406,7 +406,7 @@ export function OrdersPage() {
               <Button
                 variant="secondary"
                 className="sm:flex-1"
-                onClick={() => tenant && printOrder(selected, tenant)}
+                onClick={() => tenant && printOrderByHand(selected, tenant)}
               >
                 <Printer size={16} /> Imprimir
               </Button>
