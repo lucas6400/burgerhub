@@ -109,13 +109,15 @@ function tenantHeader(tenant: PrintTenant): string {
 /**
  * Estilo do cupom na largura do papel (58 ou 80 mm). @page sem margem tira o cabeçalho/rodapé do navegador e o recuo da
  * página; o conteúdo fica um pouco mais estreito que o papel (a cabeça térmica não imprime até a borda). Antes era uma
- * largura fixa de 280 px + margem, que estourava o papel e saía cortado/torto no computador.
+ * largura fixa de 280 px + margem, que estourava o papel e saía cortado/torto no computador. O TAMANHO do papel não
+ * é definido aqui (nem `@page size`): vale o que está configurado na impressora — forçar um tamanho personalizado fez a
+ * térmica soltar só ~1 cm em branco.
  */
 function receiptStyle(widthMm: number): string {
   return `
-  @page { size: ${widthMm}mm auto; margin: 0; }
+  @page { margin: 0; }
   html, body { margin: 0; padding: 0; background: #fff; }
-  body { font-family: "Courier New", monospace; font-size: ${widthMm <= 58 ? 11 : 12}px; width: ${widthMm - 6}mm; margin: 0 auto; padding: 2mm 0 6mm; color: #000; box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; overflow-wrap: anywhere; }
+  body { font-family: "Courier New", monospace; font-size: ${widthMm <= 58 ? 11 : 12}px; width: ${widthMm - 8}mm; margin: 0 auto; padding: 2mm 0 6mm; color: #000; box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; overflow-wrap: anywhere; }
   h2 { text-align: center; margin: 4px 0; } hr { border: none; border-top: 1px dashed #000; }
   .row { display: flex; justify-content: space-between; gap: 8px; }
   .title { font-weight: bold; font-size: 11px; letter-spacing: 1px; margin: 6px 0 2px; }

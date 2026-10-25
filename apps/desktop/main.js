@@ -131,30 +131,31 @@ ipcMain.handle("set-auto-launch", (_event, enabled) => {
   return true;
 });
 
-const PX_TO_MICRONS = 264.583; // 1 px CSS (96 dpi) = 0,2646 mm
 const MM_TO_PX = 3.7795;
+const PAINT_WAIT_MS = 400;
 
 /**
- * Imprime um HTML de cupom direto na impressora escolhida, sem caixa de diálogo, em papel contínuo da largura configurada
- * (58 ou 80 mm) e da altura exata do conteúdo, sem margens. Antes ia sem tamanho de página: a impressora usava o papel
- * padrão do driver (A4/carta) e o cupom saía cortado ou torto.
+ * Imprime um HTML de cupom direto na impressora escolhida, sem caixa de diálogo e sem margens.
+ *
+ * NÃO manda tamanho de papel: o papel é o que está configurado na impressora (driver do Windows). Mandar um tamanho
+ * personalizado (versão 0.2.0) fez a térmica ignorar o cupom e soltar só ~1 cm de papel em branco. O cupom é montado
+ * na largura do papel configurada no painel (58/80 mm), então só a largura do conteúdo é ajustada — por CSS.
  */
 ipcMain.handle("print-silent", async (_event, html, opts) => {
   const widthMm = Number(opts?.widthMm) > 0 ? Number(opts.widthMm) : 80;
   const printerName = store.get("printerName", null);
-  // A janela escondida tem a largura do papel: o cupom é montado (e medido) na mesma largura em que será impresso.
+  // A janela escondida tem a largura do papel: o cupom é montado na mesma largura em que será impresso.
   const printWin = new BrowserWindow({ show: false, width: Math.ceil(widthMm * MM_TO_PX), height: 800, useContentSize: true, webPreferences: { sandbox: true } });
   try {
     await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-    const contentHeightPx = await printWin.webContents.executeJavaScript("Math.ceil(document.documentElement.scrollHeight)");
-    const heightMicrons = Math.max(60_000, Math.ceil(Number(contentHeightPx) * PX_TO_MICRONS) + 8_000);
+    // Dá um instante pra janela escondida pintar o cupom antes de mandar pra impressora.
+    await new Promise((r) => setTimeout(r, PAINT_WAIT_MS));
     return await new Promise((resolve) => {
       printWin.webContents.print(
         {
           silent: true,
           printBackground: true,
           margins: { marginType: "none" },
-          pageSize: { width: Math.round(widthMm * 1000), height: heightMicrons },
           ...(printerName ? { deviceName: printerName } : {}),
         },
         (success, reason) => resolve({ success, reason }),
