@@ -24,6 +24,15 @@ export function isDesktopApp(): boolean {
   return typeof window !== "undefined" && !!window.electronAPI?.isElectron;
 }
 
+/** Endereço fixo do instalador do app Windows (sempre a versão mais nova — ver apps/desktop/publish-update.ps1). */
+export const DESKTOP_APP_DOWNLOAD_URL = "https://desktop-updates.vercel.app/download";
+
+/** Mostra o link de download só em computador (Windows/outro), fora do próprio app e do celular. */
+export function canOfferDesktopDownload(): boolean {
+  if (typeof navigator === "undefined" || isDesktopApp()) return false;
+  return !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
 // ---- Configurações DESTE aparelho (cada computador tem sua impressora; o telefone não imprime sozinho) ----
 const PAPER_KEY = "burgerhub.paperWidthMm";
 const AUTO_PRINT_DEVICE_KEY = "burgerhub.autoPrintDevice";

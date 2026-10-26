@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Printer } from "lucide-react";
-import { getPaperWidthMm, isAutoPrintDevice, isDesktopApp, printTestReceipt, setAutoPrintDevice, setPaperWidthMm, type PaperWidthMm, type PrintTenant } from "../lib/print";
+import { Download, Printer } from "lucide-react";
+import { canOfferDesktopDownload, DESKTOP_APP_DOWNLOAD_URL, getPaperWidthMm, isAutoPrintDevice, isDesktopApp, printTestReceipt, setAutoPrintDevice, setPaperWidthMm, type PaperWidthMm, type PrintTenant } from "../lib/print";
 import { Button, Field, Select, Toggle } from "./ui";
 
 /**
@@ -37,6 +37,11 @@ export function PrintDeviceSettings({ tenant }: { tenant: PrintTenant | null }) 
         Ligue só no computador que tem a impressora. No celular e em outros computadores deixe desligado — senão eles tentam imprimir também.
         {!isDesktopApp() && " No navegador comum ainda aparece a caixa de impressão pra confirmar; o app BurgerHub pra Windows imprime direto, sem confirmar."}
       </p>
+      {canOfferDesktopDownload() && (
+        <a href={DESKTOP_APP_DOWNLOAD_URL} className="inline-flex items-center gap-2 rounded-xl bg-brand-500 px-3 py-2 text-xs font-semibold text-white">
+          <Download size={14} /> Baixar o app BurgerHub para Windows
+        </a>
+      )}
       <Field label="Largura do papel da impressora">
         <Select
           value={String(width)}

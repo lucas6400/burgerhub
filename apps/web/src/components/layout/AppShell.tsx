@@ -16,6 +16,7 @@ import {
   Menu,
   MessageCircle,
   Moon,
+  Download,
   Package,
   Printer,
   CalendarClock,
@@ -37,6 +38,7 @@ import { useNewOrderAlert } from "../../hooks/useNewOrderAlert";
 import { useUnreadConversations } from "../../hooks/useUnreadConversations";
 import { useWhatsAppConnection } from "../../hooks/useWhatsAppConnection";
 import { canSeeDashboard } from "../../lib/access";
+import { canOfferDesktopDownload, DESKTOP_APP_DOWNLOAD_URL } from "../../lib/print";
 
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, end: true, managerOnly: true },
@@ -170,6 +172,16 @@ export function AppShell() {
         <ExternalLink size={18} />
         Cardápio Digital
       </a>
+      {canOfferDesktopDownload() && (
+        <a
+          href={DESKTOP_APP_DOWNLOAD_URL}
+          className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-surface-500 transition-colors hover:bg-surface-100 hover:text-surface-800 dark:text-surface-400 dark:hover:bg-surface-800/60"
+          title="Instalador do BurgerHub pra Windows: imprime os pedidos direto, sem caixa de confirmação, e se atualiza sozinho"
+        >
+          <Download size={18} />
+          Baixar app para Windows
+        </a>
+      )}
     </nav>
   );
 

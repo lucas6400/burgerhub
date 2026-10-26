@@ -21,8 +21,22 @@ Write-Host "Publicando versao $version..."
 Get-ChildItem $pubDir -Include *.exe, *.blockmap, latest.yml -Recurse -File | Remove-Item -Force
 Copy-Item $installer, "$installer.blockmap", $yml -Destination $pubDir -Force
 
+# Endereco FIXO de download (/download) apontando pra versao nova: e o link que o painel mostra pra quem esta logado.
+$vercelJson = @"
+{
+  "redirects": [
+    { "source": "/download", "destination": "/BurgerHub-Setup-$version.exe", "permanent": false }
+  ],
+  "headers": [
+    { "source": "/latest.yml", "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }] },
+    { "source": "/(.*).exe", "headers": [{ "key": "Cache-Control", "value": "public, max-age=3600" }] }
+  ]
+}
+"@
+[System.IO.File]::WriteAllText((Join-Path $pubDir "vercel.json"), $vercelJson, (New-Object System.Text.UTF8Encoding($false)))
+
 Push-Location $pubDir
 npx vercel deploy --prod --yes
 if ($LASTEXITCODE -ne 0) { throw "vercel deploy falhou" }
 Pop-Location
-Write-Host "Pronto! Os apps instalados vao atualizar para $version sozinhos."
+Write-Host "Pronto! Os apps instalados vao atualizar para $version sozinhos. Download novo: https://desktop-updates.vercel.app/download"
