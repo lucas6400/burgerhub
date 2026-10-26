@@ -1,1 +1,5 @@
 .vercel
+# Arquivos publicados na Vercel pelo publish-update.ps1 (instalador de ~80 MB): não vão pro git.
+*.exe
+*.blockmap
+latest.yml
