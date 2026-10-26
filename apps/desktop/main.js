@@ -1,4 +1,5 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, Notification } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const store = require("./store");
 const TRAY_ICON_DATA_URL = require("./tray-icon");
@@ -62,11 +63,17 @@ function createMainWindow() {
   });
 }
 
+/** Versão já baixada esperando pra instalar (null = nada pendente). */
+let updateReadyVersion = null;
+
 function rebuildTrayMenu() {
   const autoLaunch = app.getLoginItemSettings().openAtLogin;
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Abrir BurgerHub", click: () => mainWindow?.show() },
+      ...(updateReadyVersion
+        ? [{ label: `Reiniciar para atualizar (versão ${updateReadyVersion})`, click: () => installUpdateNow() }]
+        : []),
       { type: "separator" },
       {
         label: "Iniciar com o Windows",
@@ -98,9 +105,46 @@ function createTray() {
   rebuildTrayMenu();
 }
 
+// ---------------- Atualização automática ----------------
+// O painel em si já atualiza sozinho (a janela carrega o site). Isto cobre o "motor" do app (impressão, bandeja):
+// confere se há versão nova em desktop-updates.vercel.app, baixa em segundo plano e instala sozinha de madrugada
+// (ou na hora, pelo menu da bandeja / ao fechar o app) — sem precisar baixar o instalador de novo.
+const UPDATE_CHECK_EVERY_MS = 4 * 60 * 60_000;
+const UPDATE_INSTALL_HOUR = 5; // 05:00 — a loja está fechada
+
+function installUpdateNow() {
+  isQuitting = true;
+  autoUpdater.quitAndInstall(true, true);
+}
+
+function setupAutoUpdate() {
+  if (!app.isPackaged) return; // só no app instalado (em desenvolvimento não há o que atualizar)
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on("error", (err) => console.error("[atualização]", err?.message ?? err));
+  autoUpdater.on("update-downloaded", (info) => {
+    updateReadyVersion = info.version;
+    rebuildTrayMenu();
+    new Notification({ title: "BurgerHub — atualização pronta", body: `A versão ${info.version} instala sozinha às ${UPDATE_INSTALL_HOUR}h, ou clique no ícone da bandeja → "Reiniciar para atualizar".` }).show();
+  });
+  const check = () => autoUpdater.checkForUpdates().catch((err) => console.error("[atualização]", err?.message ?? err));
+  check();
+  setInterval(check, UPDATE_CHECK_EVERY_MS);
+  // Com a atualização baixada, instala de madrugada (o app fica ligado o dia todo, então "ao sair" quase nunca acontece).
+  setInterval(() => {
+    if (updateReadyVersion && new Date().getHours() === UPDATE_INSTALL_HOUR) installUpdateNow();
+  }, 10 * 60_000);
+}
+
+// Sem isto o "fechar (X) vira bandeja" impediria o instalador da atualização de encerrar o app.
+app.on("before-quit", () => {
+  isQuitting = true;
+});
+
 app.whenReady().then(() => {
   createMainWindow();
   createTray();
+  setupAutoUpdate();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();

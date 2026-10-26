@@ -31,6 +31,8 @@ Pop-Location
 Write-Host "Copiando instalador de volta para apps/desktop/dist..."
 New-Item -ItemType Directory -Force -Path "$srcDir\dist" | Out-Null
 Copy-Item "$buildDir\dist\*.exe" -Destination "$srcDir\dist" -Force
+# latest.yml + blockmap: é o que o app instalado lê pra saber que existe versão nova (ver publish-update.ps1).
+Copy-Item "$buildDir\dist\latest.yml", "$buildDir\dist\*.blockmap" -Destination "$srcDir\dist" -Force
 
 Write-Host "Pronto! Instalador em: $srcDir\dist"
 Get-ChildItem "$srcDir\dist\*.exe" | Select-Object Name, @{N="MB";E={[math]::Round($_.Length/1MB,1)}}
